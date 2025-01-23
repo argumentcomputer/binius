@@ -90,6 +90,13 @@ path = "blake3_circuit.rs"
 name = "u32_mul_gkr"
 path = "u32_mul_gkr.rs"
 
+[[example]]
+name = "acc-linear-combination"
+path = "acc-linear-combination.rs"
+
+[lints.clippy]
+needless_range_loop = "allow"
+
 [features]
 default = ["rayon", "nightly_features"]
 aes-tower = []
