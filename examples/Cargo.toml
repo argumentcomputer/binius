@@ -76,6 +76,10 @@ path = "b32_mul.rs"
 name = "blake3_circuit"
 path = "blake3_circuit.rs"
 
+[[example]]
+name = "acc-linear-combination"
+path = "acc-linear-combination.rs"
+
 [lints.clippy]
 needless_range_loop = "allow"
 
