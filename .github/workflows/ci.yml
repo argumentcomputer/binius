@@ -22,7 +22,7 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
       - name: Tests
-        run: cargo nextest run --release --profile ci --workspace --run-ignored all
+        run: cargo nextest run --cargo-profile test --workspace --run-ignored all
 
   lint:
     runs-on: ubuntu-latest
