@@ -94,7 +94,7 @@ fn main() {
 	let log_size = 1usize;
 
 	// Define set of bytes that we want to decompose
-	let p_in = unconstrained::<U, F128, F8>(&mut builder, format!("p_in"), log_size).unwrap();
+	let p_in = unconstrained::<U, F128, F8>(&mut builder, "p_in".to_string(), log_size).unwrap();
 
 	let _ =
 		bytes_decomposition_gadget(&mut builder, "bytes decomposition", log_size, p_in).unwrap();
