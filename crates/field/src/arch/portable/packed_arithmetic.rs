@@ -330,7 +330,7 @@ impl<OP> PackedTransformation<OP>
 where
 	OP: PackedBinaryField,
 {
-	pub fn new<Data: Deref<Target = [OP::Scalar]>>(
+	pub fn new<Data: Deref<Target = [OP::Scalar]> + Sync>(
 		transformation: FieldLinearTransformation<OP::Scalar, Data>,
 	) -> Self {
 		Self {
@@ -365,7 +365,7 @@ where
 		let ones = OP::one().to_underlier();
 		let mut input = input.to_underlier();
 
-		for base in self.bases.iter() {
+		for base in &self.bases {
 			let base_component = input & ones;
 			// contains ones at positions which correspond to non-zero components
 			let mask = broadcast_lowest_bit(base_component, OF::LOG_DEGREE);
@@ -382,9 +382,9 @@ where
 	IP: PackedBinaryField + WithUnderlier<Underlier: UnderlierWithBitOps>,
 	OP: PackedBinaryField + WithUnderlier<Underlier = IP::Underlier>,
 {
-	type PackedTransformation<Data: Deref<Target = [OP::Scalar]>> = PackedTransformation<OP>;
+	type PackedTransformation<Data: Deref<Target = [OP::Scalar]> + Sync> = PackedTransformation<OP>;
 
-	fn make_packed_transformation<Data: Deref<Target = [OP::Scalar]>>(
+	fn make_packed_transformation<Data: Deref<Target = [OP::Scalar]> + Sync>(
 		transformation: FieldLinearTransformation<OP::Scalar, Data>,
 	) -> Self::PackedTransformation<Data> {
 		PackedTransformation::new(transformation)
