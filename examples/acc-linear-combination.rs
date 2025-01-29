@@ -87,6 +87,56 @@ fn bytes_decomposition_gadget(
 	Ok(output)
 }
 
+fn elder_4bits_masking_gadget(
+	builder: &mut ConstraintSystemBuilder<U, F128>,
+	name: impl ToString,
+	log_size: usize,
+	input: OracleId,
+) -> Result<OracleId, anyhow::Error> {
+	builder.push_namespace(name);
+	let output_bits: [OracleId; 8] =
+		builder.add_committed_multiple("output_bits", log_size, F1::TOWER_LEVEL);
+
+	// we want to mask 4 elder bits in input byte
+	let lc_coefficients = [
+		F8::new(0b00000001),
+		F8::new(0b00000010),
+		F8::new(0b00000100),
+		F8::new(0b00001000),
+		F8::new(0b00000000),
+		F8::new(0b00000000),
+		F8::new(0b00000000),
+		F8::new(0b00000000),
+	];
+
+	let output = builder.add_linear_combination(
+		"output",
+		log_size,
+		(0..8).map(|b| (output_bits[b], lc_coefficients[b].into())),
+	)?;
+
+	if let Some(witness) = builder.witness() {
+		let input = witness.get::<F8>(input)?.as_slice::<F8>();
+		let mut output_bits_witness: [_; 8] = output_bits.map(|id| witness.new_column::<F1>(id));
+		let output_bits = output_bits_witness.each_mut().map(|bit| bit.packed());
+		let mut output = witness.new_column::<F8>(output);
+		let output = output.as_mut_slice::<F8>();
+		for z in 0..input.len() {
+			// apply mask to the input byte
+			let byte_out_val = u8::from(input[z]) & 0x0F;
+			output[z] = F8::from(byte_out_val);
+
+			let input_bits_bases = ExtensionField::<F1>::iter_bases(&input[z]);
+			for (b, bit) in input_bits_bases.enumerate() {
+				set_packed_slice(output_bits[b], z, bit);
+			}
+		}
+	}
+
+	builder.pop_namespace();
+	Ok(output)
+}
+
 fn main() {
 	let allocator = bumpalo::Bump::new();
 	let mut builder = ConstraintSystemBuilder::<U, F128>::new_with_witness(&allocator);
@@ -98,6 +148,8 @@ fn main() {
 
 	let _ =
 		bytes_decomposition_gadget(&mut builder, "bytes decomposition", log_size, p_in).unwrap();
+
+	let _ = elder_4bits_masking_gadget(&mut builder, "masking", log_size, p_in).unwrap();
 
 	let witness = builder.take_witness().unwrap();
 	let cs = builder.build().unwrap();
