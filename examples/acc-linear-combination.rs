@@ -23,6 +23,20 @@ fn bytes_decomposition_gadget(
 	let output_bits: [OracleId; 8] =
 		builder.add_committed_multiple("output_bits", log_size, F1::TOWER_LEVEL);
 
+	let coefficients: [OracleId; 8] =
+		builder.add_committed_multiple("coeffs", log_size, F8::TOWER_LEVEL);
+
+	let coeff_vals = [
+		F8::new(0b00000001),
+		F8::new(0b00000010),
+		F8::new(0b00000100),
+		F8::new(0b00001000),
+		F8::new(0b00010000),
+		F8::new(0b00100000),
+		F8::new(0b01000000),
+		F8::new(0b10000000),
+	];
+
 	// Define `output` variable that will store `input` bytes (we will compare this in our constraint below).
 	// Since we want to enforce decomposition, we use `LinearCombination` column which naturally fits for this purpose.
 	// We need to specify our coefficients now and later take care of defining bit columns and setting bit values appropriately
@@ -63,6 +77,18 @@ fn bytes_decomposition_gadget(
 		// Get its memory
 		let output = output.as_mut_slice::<F8>();
 
+		// Write coefficients into the witness
+		let mut coeff_witness =
+			coefficients.map(|coefficient| witness.new_column::<F8>(coefficient));
+		let coeff_witness = coeff_witness
+			.each_mut()
+			.map(|coeff| coeff.as_mut_slice::<F8>());
+		for (idx, v) in coeff_witness.into_iter().enumerate() {
+			for vv in v {
+				*vv = coeff_vals[idx];
+			}
+		}
+
 		// For each byte from the `input` we need to just copy it to the `output` and also
 		// we need to perform actual decomposition and write it in a form of packed bits to the `output_bits`
 		for z in 0..input.len() {
@@ -83,6 +109,36 @@ fn bytes_decomposition_gadget(
 
 	// We just assert that every byte from `input` equals to correspondent byte from `output`
 	builder.assert_zero("s_box", [input, output], arith_expr!([i, o] = i - o).convert_field());
+
+	// Assert decomposition
+	builder.assert_zero(
+		"decomposition",
+		[
+			input,
+			output_bits[0],
+			output_bits[1],
+			output_bits[2],
+			output_bits[3],
+			output_bits[4],
+			output_bits[5],
+			output_bits[6],
+			output_bits[7],
+			coefficients[0],
+			coefficients[1],
+			coefficients[2],
+			coefficients[3],
+			coefficients[4],
+			coefficients[5],
+			coefficients[6],
+			coefficients[7],
+		],
+		arith_expr!(
+			[i, b0, b1, b2, b3, b4, b5, b6, b7, c0, c1, c2, c3, c4, c5, c6, c7] =
+				b0 * c0 + b1 * c1 + b2 * c2 + b3 * c3 + b4 * c4 + b5 * c5 + b6 * c6 + b7 * c7 - i
+		)
+		.convert_field(),
+	);
+
 	builder.pop_namespace();
 	Ok(output)
 }
@@ -109,6 +165,9 @@ fn elder_4bits_masking_gadget(
 		F8::new(0b00000000),
 	];
 
+	let coefficients: [OracleId; 8] =
+		builder.add_committed_multiple("coeffs", log_size, F8::TOWER_LEVEL);
+
 	let output = builder.add_linear_combination(
 		"output",
 		log_size,
@@ -116,6 +175,18 @@ fn elder_4bits_masking_gadget(
 	)?;
 
 	if let Some(witness) = builder.witness() {
+		// Write coefficients into the witness
+		let mut coeff_witness =
+			coefficients.map(|coefficient| witness.new_column::<F8>(coefficient));
+		let coeff_witness = coeff_witness
+			.each_mut()
+			.map(|coeff| coeff.as_mut_slice::<F8>());
+		for (idx, v) in coeff_witness.into_iter().enumerate() {
+			for vv in v {
+				*vv = lc_coefficients[idx];
+			}
+		}
+
 		let input = witness.get::<F8>(input)?.as_slice::<F8>();
 		let mut output_bits_witness: [_; 8] = output_bits.map(|id| witness.new_column::<F1>(id));
 		let output_bits = output_bits_witness.each_mut().map(|bit| bit.packed());
@@ -132,6 +203,35 @@ fn elder_4bits_masking_gadget(
 			}
 		}
 	}
+
+	// Assert decomposition
+	builder.assert_zero(
+		"decomposition",
+		[
+			output,
+			output_bits[0],
+			output_bits[1],
+			output_bits[2],
+			output_bits[3],
+			output_bits[4],
+			output_bits[5],
+			output_bits[6],
+			output_bits[7],
+			coefficients[0],
+			coefficients[1],
+			coefficients[2],
+			coefficients[3],
+			coefficients[4],
+			coefficients[5],
+			coefficients[6],
+			coefficients[7],
+		],
+		arith_expr!(
+			[o, b0, b1, b2, b3, b4, b5, b6, b7, c0, c1, c2, c3, c4, c5, c6, c7] =
+				b0 * c0 + b1 * c1 + b2 * c2 + b3 * c3 + b4 * c4 + b5 * c5 + b6 * c6 + b7 * c7 - o
+		)
+		.convert_field(),
+	);
 
 	builder.pop_namespace();
 	Ok(output)
