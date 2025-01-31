@@ -80,6 +80,11 @@ path = "blake3_circuit.rs"
 name = "acc-linear-combination"
 path = "acc-linear-combination.rs"
 
+
+[[example]]
+name = "acc-linear-combination-with-offset"
+path = "acc-linear-combination-with-offset.rs"
+
 [lints.clippy]
 needless_range_loop = "allow"
 
