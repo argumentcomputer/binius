@@ -18,7 +18,7 @@ impl<U, F, Data> PackingDeref<U, F, Data>
 where
 	Data: Deref<Target = [U]>,
 {
-	pub fn new(data: Data) -> Self {
+	pub const fn new(data: Data) -> Self {
 		Self(data, PhantomData)
 	}
 }
@@ -32,6 +32,6 @@ where
 	type Target = [PackedType<U, F>];
 
 	fn deref(&self) -> &Self::Target {
-		<PackedType<U, F>>::from_underliers_ref(self.0.deref())
+		<PackedType<U, F>>::from_underliers_ref(&self.0)
 	}
 }

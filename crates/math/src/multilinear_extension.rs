@@ -1,20 +1,18 @@
 // Copyright 2023-2025 Irreducible Inc.
 
-use std::{cmp::min, fmt::Debug, ops::Deref};
+use std::{fmt::Debug, ops::Deref};
 
 use binius_field::{
 	as_packed_field::{AsSinglePacked, PackScalar, PackedType},
-	packed::get_packed_slice,
 	underlier::UnderlierType,
 	util::inner_product_par,
 	ExtensionField, Field, PackedField,
 };
-use binius_maybe_rayon::prelude::*;
 use binius_utils::bail;
 use bytemuck::zeroed_vec;
 use tracing::instrument;
 
-use crate::{fold, Error, MultilinearQueryRef, PackingDeref};
+use crate::{fold::fold_left, fold_right, Error, MultilinearQueryRef, PackingDeref};
 
 /// A multilinear polynomial represented by its evaluations over the boolean hypercube.
 ///
@@ -98,6 +96,7 @@ where
 }
 
 impl<'a, P: PackedField> MultilinearExtension<P, &'a [P]> {
+	#[allow(clippy::missing_const_for_fn)]
 	pub fn from_values_slice(v: &'a [P]) -> Result<Self, Error> {
 		if !v.len().is_power_of_two() {
 			bail!(Error::PowerOfTwoLengthRequired);
@@ -108,16 +107,16 @@ impl<'a, P: PackedField> MultilinearExtension<P, &'a [P]> {
 }
 
 impl<P: PackedField, Data: Deref<Target = [P]>> MultilinearExtension<P, Data> {
-	pub fn n_vars(&self) -> usize {
+	pub const fn n_vars(&self) -> usize {
 		self.mu
 	}
 
-	pub fn size(&self) -> usize {
+	pub const fn size(&self) -> usize {
 		1 << self.mu
 	}
 
 	pub fn evals(&self) -> &[P] {
-		self.evals.as_ref()
+		&self.evals
 	}
 
 	pub fn to_ref(&self) -> MultilinearExtension<P, &[P]> {
@@ -204,39 +203,22 @@ where
 		PE::Scalar: ExtensionField<P::Scalar>,
 	{
 		let query = query.into();
-		if self.mu < query.n_vars() {
-			bail!(Error::IncorrectQuerySize { expected: self.mu });
+
+		let new_n_vars = self.mu.saturating_sub(query.n_vars());
+		let result_evals_len = 1 << (new_n_vars.saturating_sub(PE::LOG_WIDTH));
+		let mut result_evals = Vec::with_capacity(result_evals_len);
+
+		fold_left(
+			self.evals(),
+			self.mu,
+			query.expansion(),
+			query.n_vars(),
+			result_evals.spare_capacity_mut(),
+		)?;
+		unsafe {
+			result_evals.set_len(result_evals_len);
 		}
 
-		let query_expansion = query.expansion();
-		let new_n_vars = self.mu - query.n_vars();
-		let result_evals_len = 1 << (new_n_vars.saturating_sub(PE::LOG_WIDTH));
-
-		// This operation is a left vector-matrix product of the vector of tensor product-expanded
-		// query coefficients with the matrix of multilinear coefficients.
-		let result_evals = (0..result_evals_len)
-			.into_par_iter()
-			.map(|outer_index| {
-				let mut res = PE::default();
-				for inner_index in 0..min(PE::WIDTH, 1 << new_n_vars) {
-					res.set(
-						inner_index,
-						PackedField::iter_slice(query_expansion)
-							.take(1 << query.n_vars())
-							.enumerate()
-							.map(|(query_index, basis_eval)| {
-								let eval_index = (query_index << new_n_vars)
-									| (outer_index << PE::LOG_WIDTH)
-									| inner_index;
-								let subpoly_eval_i = get_packed_slice(&self.evals, eval_index);
-								basis_eval * subpoly_eval_i
-							})
-							.sum(),
-					);
-				}
-				res
-			})
-			.collect();
 		MultilinearExtension::new(new_n_vars, result_evals)
 	}
 
@@ -304,7 +286,7 @@ where
 
 		// This operation is a matrix-vector product of the matrix of multilinear coefficients with
 		// the vector of tensor product-expanded query coefficients.
-		fold(&self.evals, self.mu, query.expansion(), query.n_vars(), out)
+		fold_right(&self.evals, self.mu, query.expansion(), query.n_vars(), out)
 	}
 }
 
@@ -323,7 +305,7 @@ impl<F: Field + AsSinglePacked, Data: Deref<Target = [F]>> MultilinearExtension<
 	}
 }
 
-fn log2(v: usize) -> usize {
+const fn log2(v: usize) -> usize {
 	63 - (v as u64).leading_zeros() as usize
 }
 
@@ -426,7 +408,7 @@ mod tests {
 
 		let mut partial_result = poly;
 		let mut index = q.len();
-		for split_vars in splits[0..splits.len() - 1].iter() {
+		for split_vars in &splits[0..splits.len() - 1] {
 			let split_vars = *split_vars;
 			let query = multilinear_query(&q[index - split_vars..index]);
 			partial_result = partial_result
@@ -498,7 +480,7 @@ mod tests {
 
 		let query = multilinear_query::<P>(&q);
 
-		let packed = P::from_scalars(values.clone());
+		let packed = P::from_scalars(values);
 		let me = MultilinearExtension::new(n_vars, vec![packed]).unwrap();
 
 		let eval = me.evaluate(&query).unwrap();

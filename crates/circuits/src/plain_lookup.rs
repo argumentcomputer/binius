@@ -66,7 +66,7 @@ where
 
 	let channel = builder.add_channel();
 
-	builder.send(channel, lookup_values_count, [lookup_values]);
+	builder.send(channel, lookup_values_count, [lookup_values])?;
 
 	let mut multiplicities = None;
 	// have prover compute and fill the multiplicities
@@ -93,15 +93,15 @@ where
 	components
 		.into_iter()
 		.enumerate()
-		.for_each(|(i, component)| {
+		.try_for_each(|(i, component)| {
 			builder.flush_with_multiplicity(
 				FlushDirection::Pull,
 				channel,
 				table_count,
 				[component],
 				1 << i,
-			);
-		});
+			)
+		})?;
 
 	let balancer_value_multiplicity =
 		(((1 << LOG_MAX_MULTIPLICITY) - 1) * table_count - lookup_values_count) as u64;
@@ -216,7 +216,7 @@ pub mod test_plain_lookup {
 	use super::*;
 	use crate::transparent;
 
-	fn into_lookup_claim(x: u8, y: u8, z: u16) -> u32 {
+	const fn into_lookup_claim(x: u8, y: u8, z: u16) -> u32 {
 		((z as u32) << 16) | ((y as u32) << 8) | (x as u32)
 	}
 

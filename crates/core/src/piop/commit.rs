@@ -9,7 +9,7 @@ use binius_utils::sparse_index::SparseIndex;
 
 use super::{error::Error, util::ResizeableIndex, verify::CommitMeta};
 use crate::{
-	oracle::{MultilinearOracleSet, MultilinearPolyOracle},
+	oracle::{MultilinearOracleSet, MultilinearPolyOracle, MultilinearPolyVariant},
 	witness::{MultilinearExtensionIndex, MultilinearWitness},
 };
 
@@ -42,12 +42,12 @@ pub fn make_oracle_commit_meta<F: TowerField>(
 	let mut first_pass_index = SparseIndex::new(oracles.size());
 	let mut n_multilins_by_vars = ResizeableIndex::<usize>::new();
 	for oracle in oracles.iter() {
-		if let MultilinearPolyOracle::Committed { oracle_id: id, .. } = &oracle {
+		if matches!(oracle.variant, MultilinearPolyVariant::Committed) {
 			let n_packed_vars = n_packed_vars_for_committed_oracle(&oracle)?;
 			let n_multilins_for_vars = n_multilins_by_vars.get_mut(n_packed_vars);
 
 			first_pass_index.set(
-				*id,
+				oracle.id(),
 				CommitIDFirstPass {
 					n_packed_vars,
 					idx_in_bucket: *n_multilins_for_vars,
@@ -142,18 +142,18 @@ mod tests {
 
 		let (commit_meta, index) = make_oracle_commit_meta(&oracles).unwrap();
 		assert_eq!(commit_meta.n_multilins_by_vars(), &[0, 2, 0, 4, 0, 4, 0, 2]);
-		assert_eq!(index.get(batch_0_0_ids[0]).cloned(), Some(0));
-		assert_eq!(index.get(batch_0_0_ids[1]).cloned(), Some(1));
-		assert_eq!(index.get(batch_0_1_ids[0]).cloned(), Some(2));
-		assert_eq!(index.get(batch_0_1_ids[1]).cloned(), Some(3));
-		assert_eq!(index.get(batch_0_2_ids[0]).cloned(), Some(6));
-		assert_eq!(index.get(batch_0_2_ids[1]).cloned(), Some(7));
-		assert_eq!(index.get(batch_2_0_ids[0]).cloned(), Some(4));
-		assert_eq!(index.get(batch_2_0_ids[1]).cloned(), Some(5));
-		assert_eq!(index.get(batch_2_1_ids[0]).cloned(), Some(8));
-		assert_eq!(index.get(batch_2_1_ids[1]).cloned(), Some(9));
-		assert_eq!(index.get(batch_2_2_ids[0]).cloned(), Some(10));
-		assert_eq!(index.get(batch_2_2_ids[1]).cloned(), Some(11));
-		assert_eq!(index.get(repeat).cloned(), None);
+		assert_eq!(index.get(batch_0_0_ids[0]).copied(), Some(0));
+		assert_eq!(index.get(batch_0_0_ids[1]).copied(), Some(1));
+		assert_eq!(index.get(batch_0_1_ids[0]).copied(), Some(2));
+		assert_eq!(index.get(batch_0_1_ids[1]).copied(), Some(3));
+		assert_eq!(index.get(batch_0_2_ids[0]).copied(), Some(6));
+		assert_eq!(index.get(batch_0_2_ids[1]).copied(), Some(7));
+		assert_eq!(index.get(batch_2_0_ids[0]).copied(), Some(4));
+		assert_eq!(index.get(batch_2_0_ids[1]).copied(), Some(5));
+		assert_eq!(index.get(batch_2_1_ids[0]).copied(), Some(8));
+		assert_eq!(index.get(batch_2_1_ids[1]).copied(), Some(9));
+		assert_eq!(index.get(batch_2_2_ids[0]).copied(), Some(10));
+		assert_eq!(index.get(batch_2_2_ids[1]).copied(), Some(11));
+		assert_eq!(index.get(repeat).copied(), None);
 	}
 }

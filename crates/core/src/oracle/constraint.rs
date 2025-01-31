@@ -8,7 +8,7 @@ use binius_math::{ArithExpr, CompositionPolyOS};
 use binius_utils::bail;
 use itertools::Itertools;
 
-use super::{Error, MultilinearOracleSet, MultilinearPolyOracle, OracleId};
+use super::{Error, MultilinearOracleSet, MultilinearPolyVariant, OracleId};
 
 /// Composition trait object that can be used to create lists of compositions of differing
 /// concrete types.
@@ -55,7 +55,7 @@ pub struct ConstraintSetBuilder<F: Field> {
 }
 
 impl<F: Field> ConstraintSetBuilder<F> {
-	pub fn new() -> Self {
+	pub const fn new() -> Self {
 		Self {
 			constraints: Vec::new(),
 		}
@@ -103,7 +103,7 @@ impl<F: Field> ConstraintSetBuilder<F> {
 			// Do not bail!, this error is handled in evalcheck.
 			return Err(Error::EmptyConstraintSet);
 		}
-		for id in oracle_ids.iter() {
+		for id in &oracle_ids {
 			if !oracles.is_valid_oracle_id(*id) {
 				bail!(Error::InvalidOracleId(*id));
 			}
@@ -116,7 +116,7 @@ impl<F: Field> ConstraintSetBuilder<F> {
 			.map(|id| oracles.n_vars(*id))
 			.unwrap_or_default();
 
-		for id in oracle_ids.iter() {
+		for id in &oracle_ids {
 			if oracles.n_vars(*id) != n_vars {
 				bail!(Error::ConstraintSetNvarsMismatch {
 					expected: n_vars,
@@ -160,24 +160,14 @@ impl<F: Field> ConstraintSetBuilder<F> {
 			.constraints
 			.iter()
 			.map(|constraint| constraint.oracle_ids.clone())
-			.chain(oracles.iter().filter_map(|oracle| {
-				match oracle {
-					MultilinearPolyOracle::Shifted { id, shifted, .. } => {
-						Some(vec![id, shifted.inner().id()])
-					}
-					MultilinearPolyOracle::LinearCombination {
-						id,
-						linear_combination,
-						..
-					} => Some(
-						linear_combination
-							.polys()
-							.map(|p| p.id())
-							.chain([id])
-							.collect(),
-					),
-					_ => None,
+			.chain(oracles.iter().filter_map(|oracle| match oracle.variant {
+				MultilinearPolyVariant::Shifted(ref shifted) => {
+					Some(vec![oracle.id(), shifted.id()])
 				}
+				MultilinearPolyVariant::LinearCombination(ref linear_combination) => {
+					Some(linear_combination.polys().chain([oracle.id()]).collect())
+				}
+				_ => None,
 			}))
 			.collect::<Vec<_>>();
 
@@ -195,7 +185,7 @@ impl<F: Field> ConstraintSetBuilder<F> {
 				if constraint.oracle_ids.is_empty() {
 					bail!(Error::EmptyConstraintSet);
 				}
-				for id in constraint.oracle_ids.iter() {
+				for id in &constraint.oracle_ids {
 					if !oracles.is_valid_oracle_id(*id) {
 						bail!(Error::InvalidOracleId(*id));
 					}
@@ -206,7 +196,7 @@ impl<F: Field> ConstraintSetBuilder<F> {
 					.map(|id| oracles.n_vars(*id))
 					.unwrap();
 
-				for id in constraint.oracle_ids.iter() {
+				for id in &constraint.oracle_ids {
 					if oracles.n_vars(*id) != n_vars {
 						bail!(Error::ConstraintSetNvarsMismatch {
 							expected: n_vars,

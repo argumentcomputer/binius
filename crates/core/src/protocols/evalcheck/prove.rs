@@ -21,7 +21,7 @@ use super::{
 use crate::{
 	oracle::{
 		ConstraintSet, ConstraintSetBuilder, Error as OracleError, MultilinearOracleSet,
-		MultilinearPolyOracle, ProjectionVariant,
+		MultilinearPolyOracle, MultilinearPolyVariant, OracleId, ProjectionVariant,
 	},
 	protocols::evalcheck::subclaims::{
 		packed_sumcheck_meta, process_packed_sumcheck, process_shifted_sumcheck,
@@ -123,9 +123,8 @@ where
 		evalcheck_claims: Vec<EvalcheckMultilinearClaim<F>>,
 	) -> Result<Vec<EvalcheckProof<F>>, Error> {
 		for claim in &evalcheck_claims {
-			let id = claim.poly.id();
 			self.claims_without_evals_dedup
-				.insert(id, claim.eval_point.clone(), ());
+				.insert(claim.id, claim.eval_point.clone(), ());
 		}
 
 		// Step 1: Collect proofs
@@ -175,7 +174,7 @@ where
 				.into_par_iter()
 				.map(|(poly, eval_point)| {
 					Self::make_new_eval_claim(
-						poly,
+						poly.id(),
 						eval_point,
 						self.witness_index,
 						&self.memoized_queries,
@@ -240,7 +239,7 @@ where
 			.iter()
 			.map(|claim| {
 				self.finalized_proofs
-					.get(claim.poly.id(), &claim.eval_point)
+					.get(claim.id, &claim.eval_point)
 					.map(|(_, proof)| proof.clone())
 					.expect("finalized_proofs contains all the proofs")
 			})
@@ -253,9 +252,7 @@ where
 		level = "debug"
 	)]
 	fn prove_multilinear(&mut self, evalcheck_claim: EvalcheckMultilinearClaim<F>) {
-		let multilinear = evalcheck_claim.poly.clone();
-
-		let multilinear_id = multilinear.id();
+		let multilinear_id = evalcheck_claim.id;
 
 		let eval_point = evalcheck_claim.eval_point.clone();
 
@@ -277,10 +274,10 @@ where
 			return;
 		}
 
-		use MultilinearPolyOracle::*;
+		let multilinear = self.oracles.oracle(multilinear_id);
 
-		match multilinear {
-			Transparent { .. } => {
+		match multilinear.variant {
+			MultilinearPolyVariant::Transparent { .. } => {
 				self.finalized_proofs.insert(
 					multilinear_id,
 					eval_point,
@@ -288,7 +285,7 @@ where
 				);
 			}
 
-			Committed { .. } => {
+			MultilinearPolyVariant::Committed { .. } => {
 				self.finalized_proofs.insert(
 					multilinear_id,
 					eval_point,
@@ -296,11 +293,11 @@ where
 				);
 			}
 
-			Repeating { inner, .. } => {
-				let n_vars = inner.n_vars();
+			MultilinearPolyVariant::Repeating { id, .. } => {
+				let n_vars = self.oracles.n_vars(id);
 				let inner_eval_point = eval_point.slice(0..n_vars);
 				let subclaim = EvalcheckMultilinearClaim {
-					poly: (*inner).clone(),
+					id,
 					eval_point: inner_eval_point,
 					eval,
 				};
@@ -309,7 +306,7 @@ where
 				self.claims_queue.push(subclaim);
 			}
 
-			Shifted { .. } => {
+			MultilinearPolyVariant::Shifted { .. } => {
 				self.finalized_proofs.insert(
 					multilinear_id,
 					eval_point,
@@ -317,7 +314,7 @@ where
 				);
 			}
 
-			Packed { .. } => {
+			MultilinearPolyVariant::Packed { .. } => {
 				self.finalized_proofs.insert(
 					multilinear_id,
 					eval_point,
@@ -325,8 +322,8 @@ where
 				);
 			}
 
-			Projected { projected, .. } => {
-				let (inner, values) = (projected.inner(), projected.values());
+			MultilinearPolyVariant::Projected(projected) => {
+				let (id, values) = (projected.id(), projected.values());
 				let new_eval_point = match projected.projection_variant() {
 					ProjectionVariant::LastVars => {
 						let mut new_eval_point = eval_point.to_vec();
@@ -334,12 +331,12 @@ where
 						new_eval_point
 					}
 					ProjectionVariant::FirstVars => {
-						values.iter().cloned().chain(eval_point.to_vec()).collect()
+						values.iter().copied().chain(eval_point.to_vec()).collect()
 					}
 				};
 
 				let subclaim = EvalcheckMultilinearClaim {
-					poly: (**inner).clone(),
+					id,
 					eval_point: new_eval_point.into(),
 					eval,
 				};
@@ -348,9 +345,7 @@ where
 				self.claims_queue.push(subclaim);
 			}
 
-			LinearCombination {
-				linear_combination, ..
-			} => {
+			MultilinearPolyVariant::LinearCombination(linear_combination) => {
 				let n_polys = linear_combination.n_polys();
 
 				match linear_combination
@@ -358,20 +353,20 @@ where
 					.zip(linear_combination.coefficients())
 					.next()
 				{
-					Some((suboracle, coeff)) if n_polys == 1 && !coeff.is_zero() => {
+					Some((suboracle_id, coeff)) if n_polys == 1 && !coeff.is_zero() => {
 						let eval = (eval - linear_combination.offset())
 							* coeff.invert().expect("not zero");
 						let subclaim = EvalcheckMultilinearClaim {
-							poly: suboracle.clone(),
+							id: suboracle_id,
 							eval_point: eval_point.clone(),
 							eval,
 						};
 						self.claims_queue.push(subclaim);
 					}
 					_ => {
-						for suboracle in linear_combination.polys() {
+						for suboracle_id in linear_combination.polys() {
 							self.claims_without_evals
-								.push(((*suboracle).clone(), eval_point.clone()));
+								.push((self.oracles.oracle(suboracle_id), eval_point.clone()));
 						}
 					}
 				};
@@ -380,12 +375,11 @@ where
 					.insert(multilinear_id, eval_point, evalcheck_claim);
 			}
 
-			ZeroPadded { inner, .. } => {
+			MultilinearPolyVariant::ZeroPadded(id) => {
+				let inner = self.oracles.oracle(id);
 				let inner_n_vars = inner.n_vars();
-
 				let inner_eval_point = eval_point.slice(0..inner_n_vars);
-				self.claims_without_evals
-					.push(((*inner).clone(), inner_eval_point));
+				self.claims_without_evals.push((inner, inner_eval_point));
 				self.incomplete_proof_claims
 					.insert(multilinear_id, eval_point, evalcheck_claim);
 			}
@@ -393,30 +387,25 @@ where
 	}
 
 	fn complete_proof(&mut self, evalcheck_claim: &EvalcheckMultilinearClaim<F>) -> bool {
-		use MultilinearPolyOracle::*;
-
-		let multilinear = &evalcheck_claim.poly;
+		let id = &evalcheck_claim.id;
 		let eval_point = evalcheck_claim.eval_point.clone();
 		let eval = evalcheck_claim.eval;
 
-		let res = match multilinear {
-			Repeating { inner, .. } => {
-				let n_vars = inner.n_vars();
+		let res = match self.oracles.oracle(*id).variant {
+			MultilinearPolyVariant::Repeating { id, .. } => {
+				let n_vars = self.oracles.n_vars(id);
 				let inner_eval_point = &evalcheck_claim.eval_point[..n_vars];
 				self.finalized_proofs
-					.get(inner.id(), inner_eval_point)
+					.get(id, inner_eval_point)
 					.map(|(_, subproof)| subproof.clone())
 					.map(move |subproof| {
 						let proof = EvalcheckProof::Repeating(Box::new(subproof));
-						self.finalized_proofs.insert(
-							evalcheck_claim.poly.id(),
-							eval_point,
-							(eval, proof),
-						);
+						self.finalized_proofs
+							.insert(evalcheck_claim.id, eval_point, (eval, proof));
 					})
 			}
-			Projected { projected, .. } => {
-				let (inner, values) = (projected.inner(), projected.values());
+			MultilinearPolyVariant::Projected(projected) => {
+				let (id, values) = (projected.id(), projected.values());
 				let new_eval_point = match projected.projection_variant() {
 					ProjectionVariant::LastVars => {
 						let mut new_eval_point = eval_point.to_vec();
@@ -425,50 +414,47 @@ where
 					}
 					ProjectionVariant::FirstVars => values
 						.iter()
-						.cloned()
+						.copied()
 						.chain((*eval_point).to_vec())
 						.collect(),
 				};
-				let new_poly = inner.clone();
 				self.finalized_proofs
-					.get(new_poly.id(), &new_eval_point)
+					.get(id, &new_eval_point)
 					.map(|(_, subproof)| subproof.clone())
 					.map(|subproof| {
 						self.finalized_proofs.insert(
-							evalcheck_claim.poly.id(),
+							evalcheck_claim.id,
 							eval_point,
 							(eval, subproof),
 						);
 					})
 			}
 
-			LinearCombination {
-				linear_combination, ..
-			} => linear_combination
+			MultilinearPolyVariant::LinearCombination(linear_combination) => linear_combination
 				.polys()
-				.map(|suboracle| {
+				.map(|suboracle_id| {
 					self.finalized_proofs
-						.get(suboracle.id(), &evalcheck_claim.eval_point)
+						.get(suboracle_id, &evalcheck_claim.eval_point)
 						.map(|(eval, subproof)| (*eval, subproof.clone()))
 				})
 				.collect::<Option<Vec<_>>>()
 				.map(|subproofs| {
 					self.finalized_proofs.insert(
-						evalcheck_claim.poly.id(),
+						evalcheck_claim.id,
 						eval_point,
 						(eval, EvalcheckProof::LinearCombination { subproofs }),
 					);
 				}),
 
-			ZeroPadded { inner, .. } => {
-				let inner_n_vars = inner.n_vars();
+			MultilinearPolyVariant::ZeroPadded(inner_id) => {
+				let inner_n_vars = self.oracles.n_vars(inner_id);
 				let inner_eval_point = &evalcheck_claim.eval_point[..inner_n_vars];
 				self.finalized_proofs
-					.get(inner.id(), inner_eval_point)
+					.get(inner_id, inner_eval_point)
 					.map(|(eval, subproof)| (*eval, subproof.clone()))
 					.map(|(internal_eval, subproof)| {
 						self.finalized_proofs.insert(
-							evalcheck_claim.poly.id(),
+							evalcheck_claim.id,
 							eval_point,
 							(eval, EvalcheckProof::ZeroPadded(internal_eval, Box::new(subproof))),
 						);
@@ -481,36 +467,35 @@ where
 
 	fn collect_projected_committed(&mut self, evalcheck_claim: EvalcheckMultilinearClaim<F>) {
 		let EvalcheckMultilinearClaim {
-			poly: multilinear,
+			id,
 			eval_point,
 			eval,
 		} = evalcheck_claim.clone();
 
-		use MultilinearPolyOracle::*;
-
-		match multilinear {
-			Committed { .. } => {
+		let multilinear = self.oracles.oracle(id);
+		match multilinear.variant {
+			MultilinearPolyVariant::Committed => {
 				let subclaim = EvalcheckMultilinearClaim {
-					poly: multilinear,
+					id: multilinear.id,
 					eval_point,
 					eval,
 				};
 
 				self.committed_eval_claims.push(subclaim);
 			}
-			Repeating { inner, .. } => {
-				let n_vars = inner.n_vars();
+			MultilinearPolyVariant::Repeating { id, .. } => {
+				let n_vars = self.oracles.n_vars(id);
 				let inner_eval_point = eval_point.slice(0..n_vars);
 				let subclaim = EvalcheckMultilinearClaim {
-					poly: (*inner).clone(),
+					id,
 					eval_point: inner_eval_point,
 					eval,
 				};
 
 				self.collect_projected_committed(subclaim);
 			}
-			Projected { projected, .. } => {
-				let (inner, values) = (projected.inner(), projected.values());
+			MultilinearPolyVariant::Projected(projected) => {
+				let (id, values) = (projected.id(), projected.values());
 				let new_eval_point = match projected.projection_variant() {
 					ProjectionVariant::LastVars => {
 						let mut new_eval_point = eval_point.to_vec();
@@ -518,49 +503,46 @@ where
 						new_eval_point
 					}
 					ProjectionVariant::FirstVars => {
-						values.iter().cloned().chain(eval_point.to_vec()).collect()
+						values.iter().copied().chain(eval_point.to_vec()).collect()
 					}
 				};
 
-				let new_poly = (**inner).clone();
-
 				let subclaim = EvalcheckMultilinearClaim {
-					poly: new_poly,
+					id,
 					eval_point: new_eval_point.into(),
 					eval,
 				};
 				self.collect_projected_committed(subclaim);
 			}
-			Shifted { .. } => self.projected_bivariate_claims.push(evalcheck_claim),
-			Packed { .. } => self.projected_bivariate_claims.push(evalcheck_claim),
-			LinearCombination {
-				linear_combination, ..
-			} => {
-				for poly in linear_combination.polys().cloned() {
+			MultilinearPolyVariant::Shifted { .. } | MultilinearPolyVariant::Packed { .. } => {
+				self.projected_bivariate_claims.push(evalcheck_claim)
+			}
+			MultilinearPolyVariant::LinearCombination(linear_combination) => {
+				for id in linear_combination.polys() {
 					let (eval, _) = self
 						.finalized_proofs
-						.get(poly.id(), &eval_point)
+						.get(id, &eval_point)
 						.expect("finalized_proofs contains all the proofs");
 					let subclaim = EvalcheckMultilinearClaim {
-						poly,
+						id,
 						eval_point: eval_point.clone(),
 						eval: *eval,
 					};
 					self.collect_projected_committed(subclaim);
 				}
 			}
-			ZeroPadded { inner, .. } => {
-				let inner_n_vars = inner.n_vars();
+			MultilinearPolyVariant::ZeroPadded(id) => {
+				let inner_n_vars = self.oracles.n_vars(id);
 				let inner_eval_point = eval_point.slice(0..inner_n_vars);
 
 				let (eval, _) = self
 					.finalized_proofs
-					.get(inner.id(), &inner_eval_point)
+					.get(id, &inner_eval_point)
 					.expect("finalized_proofs contains all the proofs");
 
 				let subclaim = EvalcheckMultilinearClaim {
-					poly: (*inner).clone(),
-					eval_point: eval_point.clone(),
+					id,
+					eval_point,
 					eval: *eval,
 				};
 				self.collect_projected_committed(subclaim);
@@ -573,18 +555,15 @@ where
 		oracles: &mut MultilinearOracleSet<F>,
 		evalcheck_claim: &EvalcheckMultilinearClaim<F>,
 	) -> Result<ProjectedBivariateMeta, Error> {
-		use MultilinearPolyOracle::*;
+		let EvalcheckMultilinearClaim { id, eval_point, .. } = evalcheck_claim;
 
-		let EvalcheckMultilinearClaim {
-			poly: multilinear,
-			eval_point,
-			..
-		} = evalcheck_claim;
-
-		match multilinear {
-			Shifted { shifted, .. } => shifted_sumcheck_meta(oracles, shifted, eval_point),
-
-			Packed { packed, .. } => packed_sumcheck_meta(oracles, packed, eval_point),
+		match &oracles.oracle(*id).variant {
+			MultilinearPolyVariant::Shifted(shifted) => {
+				shifted_sumcheck_meta(oracles, shifted, eval_point)
+			}
+			MultilinearPolyVariant::Packed(packed) => {
+				packed_sumcheck_meta(oracles, packed, eval_point)
+			}
 			_ => unreachable!(),
 		}
 	}
@@ -595,16 +574,14 @@ where
 		meta: ProjectedBivariateMeta,
 		projected: MultilinearExtension<PackedType<U, F>>,
 	) -> Result<(), Error> {
-		use MultilinearPolyOracle::*;
-
 		let EvalcheckMultilinearClaim {
-			poly: multilinear,
+			id,
 			eval_point,
 			eval,
 		} = evalcheck_claim;
 
-		match multilinear {
-			Shifted { shifted, .. } => process_shifted_sumcheck(
+		match self.oracles.oracle(id).variant {
+			MultilinearPolyVariant::Shifted(shifted) => process_shifted_sumcheck(
 				&shifted,
 				meta,
 				&eval_point,
@@ -614,7 +591,8 @@ where
 				projected,
 			)?,
 
-			Packed { packed, .. } => process_packed_sumcheck(
+			MultilinearPolyVariant::Packed(packed) => process_packed_sumcheck(
+				self.oracles,
 				&packed,
 				meta,
 				&eval_point,
@@ -629,7 +607,7 @@ where
 	}
 
 	fn make_new_eval_claim(
-		poly: MultilinearPolyOracle<F>,
+		oracle_id: OracleId,
 		eval_point: EvalPoint<F>,
 		witness_index: &MultilinearExtensionIndex<U, F>,
 		memoized_queries: &MemoizedQueries<PackedType<U, F>, Backend>,
@@ -639,7 +617,7 @@ where
 			.ok_or(Error::MissingQuery)?;
 
 		let witness_poly = witness_index
-			.get_multilin_poly(poly.id())
+			.get_multilin_poly(oracle_id)
 			.map_err(Error::Witness)?;
 
 		let eval = witness_poly
@@ -647,7 +625,7 @@ where
 			.map_err(Error::from)?;
 
 		Ok(EvalcheckMultilinearClaim {
-			poly,
+			id: oracle_id,
 			eval_point,
 			eval,
 		})

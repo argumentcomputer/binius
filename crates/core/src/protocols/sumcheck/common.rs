@@ -60,7 +60,7 @@ where
 	) -> Result<Self, Error> {
 		for CompositeSumClaim {
 			ref composition, ..
-		} in composite_sums.iter()
+		} in &composite_sums
 		{
 			if composition.n_vars() != n_multilinears {
 				bail!(Error::InvalidComposition {
@@ -104,14 +104,13 @@ impl<F: Field> RoundCoeffs<F> {
 
 	/// Truncate one coefficient from the polynomial to a more compact round proof.
 	pub fn truncate(mut self) -> RoundProof<F> {
-		let new_len = self.0.len().saturating_sub(1);
-		self.0.truncate(new_len);
+		self.0.pop();
 		RoundProof(self)
 	}
 }
 
 impl<F: Field> Add<&Self> for RoundCoeffs<F> {
-	type Output = RoundCoeffs<F>;
+	type Output = Self;
 
 	fn add(mut self, rhs: &Self) -> Self::Output {
 		self += rhs;
@@ -132,7 +131,7 @@ impl<F: Field> AddAssign<&Self> for RoundCoeffs<F> {
 }
 
 impl<F: Field> Mul<F> for RoundCoeffs<F> {
-	type Output = RoundCoeffs<F>;
+	type Output = Self;
 
 	fn mul(mut self, rhs: F) -> Self::Output {
 		self *= rhs;
@@ -142,7 +141,7 @@ impl<F: Field> Mul<F> for RoundCoeffs<F> {
 
 impl<F: Field> MulAssign<F> for RoundCoeffs<F> {
 	fn mul_assign(&mut self, rhs: F) {
-		for coeff in self.0.iter_mut() {
+		for coeff in &mut self.0 {
 			*coeff *= rhs;
 		}
 	}
@@ -179,7 +178,7 @@ impl<F: Field> RoundProof<F> {
 	/// In the unoptimized version of the protocol, the verifier will halt and reject
 	/// if given a round polynomial that does not satisfy the above identity.
 	pub fn recover(self, sum: F) -> RoundCoeffs<F> {
-		let RoundProof(RoundCoeffs(mut coeffs)) = self;
+		let Self(RoundCoeffs(mut coeffs)) = self;
 		let first_coeff = coeffs.first().copied().unwrap_or(F::ZERO);
 		let last_coeff = sum - first_coeff - coeffs.iter().sum::<F>();
 		coeffs.push(last_coeff);
@@ -239,7 +238,7 @@ pub fn standard_switchover_heuristic(k: isize) -> impl Fn(usize) -> usize + Copy
 }
 
 /// Sumcheck switchover heuristic that begins folding immediately in the first round.
-pub fn immediate_switchover_heuristic(_extension_degree: usize) -> usize {
+pub const fn immediate_switchover_heuristic(_extension_degree: usize) -> usize {
 	0
 }
 
@@ -282,16 +281,15 @@ where
 /// type of small field `PBase`.
 ///
 /// Returns binary logarithm of the embedding degree.
-pub fn small_field_embedding_degree_check<PBase, P, M>(multilinears: &[M]) -> Result<(), Error>
+pub fn small_field_embedding_degree_check<F, FBase, P, M>(multilinears: &[M]) -> Result<(), Error>
 where
-	PBase: PackedField,
-	P: PackedField<Scalar: ExtensionField<PBase::Scalar>>,
+	F: Field + ExtensionField<FBase>,
+	FBase: Field,
+	P: PackedField<Scalar = F>,
 	M: MultilinearPoly<P>,
 {
-	let log_embedding_degree = <P::Scalar as ExtensionField<PBase::Scalar>>::LOG_DEGREE;
-
 	for multilinear in multilinears {
-		if multilinear.log_extension_degree() < log_embedding_degree {
+		if multilinear.log_extension_degree() < F::LOG_DEGREE {
 			bail!(Error::MultilinearEvalsCannotBeEmbeddedInBaseField);
 		}
 	}
@@ -303,4 +301,27 @@ where
 pub fn batch_weighted_value<F: Field>(batch_coeff: F, values: impl Iterator<Item = F>) -> F {
 	// Multiplying by batch_coeff is important for security!
 	batch_coeff * inner_product_unchecked(powers(batch_coeff), values)
+}
+
+#[cfg(test)]
+mod tests {
+	use binius_field::BinaryField64b;
+
+	use super::*;
+
+	type F = BinaryField64b;
+
+	#[test]
+	fn test_round_coeffs_truncate_non_empty() {
+		let coeffs = RoundCoeffs(vec![F::from(1), F::from(2), F::from(3)]);
+		let truncated = coeffs.truncate();
+		assert_eq!(truncated.0 .0, vec![F::from(1), F::from(2)]);
+	}
+
+	#[test]
+	fn test_round_coeffs_truncate_empty() {
+		let coeffs = RoundCoeffs::<F>(vec![]);
+		let truncated = coeffs.truncate();
+		assert!(truncated.0 .0.is_empty());
+	}
 }

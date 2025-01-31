@@ -1,6 +1,6 @@
 // Copyright 2024-2025 Irreducible Inc.
 
-use std::{cmp::Reverse, env, marker::PhantomData};
+use std::{cmp::Reverse, env, marker::PhantomData, slice::from_mut};
 
 use binius_field::{
 	as_packed_field::{PackScalar, PackedType},
@@ -23,6 +23,7 @@ use itertools::{chain, izip};
 use tracing::instrument;
 
 use super::{
+	channel::Boundary,
 	error::Error,
 	verify::{
 		get_post_flush_sumcheck_eval_claims_without_eq, make_flush_oracles,
@@ -33,11 +34,11 @@ use super::{
 use crate::{
 	constraint_system::{
 		common::{FDomain, FEncode, FExt, FFastExt},
-		verify::{get_flush_dedup_sumcheck_metas, FlushSumcheckMeta, StepDownMeta},
+		verify::{get_flush_dedup_sumcheck_metas, FlushSumcheckMeta},
 	},
 	fiat_shamir::{CanSample, Challenger},
 	merkle_tree::BinaryMerkleTreeProver,
-	oracle::{Constraint, MultilinearOracleSet, MultilinearPolyOracle, OracleId},
+	oracle::{Constraint, MultilinearOracleSet, MultilinearPolyVariant, OracleId},
 	piop,
 	protocols::{
 		fri::CommitOutput,
@@ -64,6 +65,7 @@ pub fn prove<U, Tower, DomainFactory, Hash, Compress, Challenger_, Backend>(
 	constraint_system: &ConstraintSystem<FExt<Tower>>,
 	log_inv_rate: usize,
 	security_bits: usize,
+	boundaries: &[Boundary<FExt<Tower>>],
 	mut witness: MultilinearExtensionIndex<U, FExt<Tower>>,
 	domain_factory: DomainFactory,
 	backend: &Backend,
@@ -88,14 +90,10 @@ where
 		+ PackedTransformationFactory<PackedType<U, Tower::FastB128>>,
 	PackedType<U, Tower::FastB128>:
 		PackedFieldIndexable + PackedTransformationFactory<PackedType<U, Tower::B128>>,
-	PackedType<U, Tower::B8>: PackedFieldIndexable
-		+ PackedExtension<FDomain<Tower>, PackedSubfield: PackedFieldIndexable>,
-	PackedType<U, Tower::B16>: PackedFieldIndexable
-		+ PackedExtension<FDomain<Tower>, PackedSubfield: PackedFieldIndexable>,
-	PackedType<U, Tower::B32>: PackedFieldIndexable
-		+ PackedExtension<FDomain<Tower>, PackedSubfield: PackedFieldIndexable>,
-	PackedType<U, Tower::B64>: PackedFieldIndexable
-		+ PackedExtension<FDomain<Tower>, PackedSubfield: PackedFieldIndexable>,
+	PackedType<U, Tower::B8>: PackedFieldIndexable,
+	PackedType<U, Tower::B16>: PackedFieldIndexable,
+	PackedType<U, Tower::B32>: PackedFieldIndexable,
+	PackedType<U, Tower::B64>: PackedFieldIndexable,
 {
 	tracing::debug!(
 		arch = env::consts::ARCH,
@@ -106,6 +104,12 @@ where
 	let fast_domain_factory = IsomorphicEvaluationDomainFactory::<FFastExt<Tower>>::default();
 
 	let mut transcript = ProverTranscript::<Challenger_>::new();
+	{
+		let mut observer = transcript.observe();
+		for boundary in boundaries {
+			boundary.write_to(&mut observer);
+		}
+	}
 
 	let ConstraintSystem {
 		mut oracles,
@@ -179,7 +183,10 @@ where
 	flushes.sort_by_key(|flush| flush.channel_id);
 	let flush_oracle_ids =
 		make_flush_oracles(&mut oracles, &flushes, mixing_challenge, &permutation_challenges)?;
-	let flush_counts = flushes.iter().map(|flush| flush.count).collect::<Vec<_>>();
+	let flush_selectors = flushes
+		.iter()
+		.map(|flush| flush.selector)
+		.collect::<Vec<_>>();
 
 	make_unmasked_flush_witnesses(&oracles, &mut witness, &flush_oracle_ids)?;
 	// there are no oracle ids associated with these flush_witnesses
@@ -187,7 +194,7 @@ where
 		&oracles,
 		&witness,
 		&flush_oracle_ids,
-		Some(&flush_counts),
+		Some(&flush_selectors),
 	)?;
 
 	// This is important to do in parallel.
@@ -228,34 +235,37 @@ where
 
 	// Reduce non_zero_final_layer_claims to evalcheck claims
 	let non_zero_prodcheck_eval_claims =
-		gkr_gpa::make_eval_claims(&oracles, non_zero_oracle_ids, non_zero_final_layer_claims)?;
+		gkr_gpa::make_eval_claims(non_zero_oracle_ids, non_zero_final_layer_claims)?;
 
 	// Reduce flush_final_layer_claims to sumcheck claims then evalcheck claims
-	let (flush_oracle_ids, flush_counts, flush_final_layer_claims) = reorder_for_flushing_by_n_vars(
-		&oracles,
-		flush_oracle_ids,
-		flush_counts,
-		flush_final_layer_claims,
-	);
+	let (flush_oracle_ids, flush_selectors, flush_final_layer_claims) =
+		reorder_for_flushing_by_n_vars(
+			&oracles,
+			flush_oracle_ids,
+			flush_selectors,
+			flush_final_layer_claims,
+		);
 
-	let (flush_sumcheck_provers, all_step_down_metas, flush_oracles_by_claim) =
-		get_flush_sumcheck_provers::<_, _, FDomain<Tower>, _, _>(
-			&mut oracles,
-			&flush_oracle_ids,
-			&flush_counts,
-			&flush_final_layer_claims,
-			&mut witness,
-			&domain_factory,
-			backend,
-		)?;
+	let FlushSumcheckProvers {
+		provers,
+		flush_selectors_unique_by_claim,
+		flush_oracle_ids_by_claim,
+	} = get_flush_sumcheck_provers::<_, _, FDomain<Tower>, _, _>(
+		&mut oracles,
+		&flush_oracle_ids,
+		&flush_selectors,
+		&flush_final_layer_claims,
+		&mut witness,
+		&domain_factory,
+		backend,
+	)?;
 
-	let flush_sumcheck_output =
-		sumcheck::prove::batch_prove(flush_sumcheck_provers, &mut transcript)?;
+	let flush_sumcheck_output = sumcheck::prove::batch_prove(provers, &mut transcript)?;
 
 	let flush_eval_claims = get_post_flush_sumcheck_eval_claims_without_eq(
 		&oracles,
-		&all_step_down_metas,
-		&flush_oracles_by_claim,
+		&flush_selectors_unique_by_claim,
+		&flush_oracle_ids_by_claim,
 		&flush_sumcheck_output,
 	)?;
 
@@ -311,11 +321,11 @@ where
 			};
 
 		let either_prover = match base_tower_level {
-			0..=3 => constructor.create::<PackedType<U, Tower::B8>>(univariate_decider)?,
-			4 => constructor.create::<PackedType<U, Tower::B16>>(univariate_decider)?,
-			5 => constructor.create::<PackedType<U, Tower::B32>>(univariate_decider)?,
-			6 => constructor.create::<PackedType<U, Tower::B64>>(univariate_decider)?,
-			7 => constructor.create::<PackedType<U, Tower::B128>>(univariate_decider)?,
+			0..=3 => constructor.create::<Tower::B8>(univariate_decider)?,
+			4 => constructor.create::<Tower::B16>(univariate_decider)?,
+			5 => constructor.create::<Tower::B32>(univariate_decider)?,
+			6 => constructor.create::<Tower::B64>(univariate_decider)?,
+			7 => constructor.create::<Tower::B128>(univariate_decider)?,
 			_ => unreachable!(),
 		};
 
@@ -393,7 +403,7 @@ where
 	)?;
 
 	let zerocheck_eval_claims =
-		sumcheck::make_eval_claims(&oracles, zerocheck_oracle_metas, multilinear_zerocheck_output)?;
+		sumcheck::make_eval_claims(zerocheck_oracle_metas, multilinear_zerocheck_output)?;
 
 	// Prove evaluation claims
 	let eval_claims = greedy_evalcheck::prove::<_, _, FDomain<Tower>, _, _>(
@@ -410,8 +420,12 @@ where
 	)?;
 
 	// Reduce committed evaluation claims to PIOP sumcheck claims
-	let system =
-		ring_switch::EvalClaimSystem::new(&commit_meta, oracle_to_commit_index, &eval_claims)?;
+	let system = ring_switch::EvalClaimSystem::new(
+		&oracles,
+		&commit_meta,
+		oracle_to_commit_index,
+		&eval_claims,
+	)?;
 
 	let ring_switch::ReducedWitness {
 		transparents: transparent_multilins,
@@ -485,34 +499,36 @@ where
 	_fdomain_marker: PhantomData<FDomain>,
 }
 
-impl<'a, P, FDomain, DomainFactory, SwitchoverFn, Backend>
+impl<'a, P, F, FDomain, DomainFactory, SwitchoverFn, Backend>
 	ZerocheckProverConstructor<'a, P, FDomain, DomainFactory, SwitchoverFn, Backend>
 where
-	P: PackedFieldIndexable,
+	F: Field,
+	P: PackedFieldIndexable<Scalar = F>,
 	FDomain: TowerField,
 	DomainFactory: EvaluationDomainFactory<FDomain>,
 	SwitchoverFn: Fn(usize) -> usize + Clone,
 	Backend: ComputationBackend,
 {
-	fn create<PBase>(
+	fn create<FBase>(
 		self,
 		is_univariate: impl FnOnce(usize) -> bool,
-	) -> Result<TypeErasedProver<'a, P::Scalar>, Error>
+	) -> Result<TypeErasedProver<'a, F>, Error>
 	where
-		PBase:
-			PackedFieldIndexable + PackedExtension<FDomain, PackedSubfield: PackedFieldIndexable>,
-		PBase::Scalar: TowerField + ExtensionField<FDomain> + TryFrom<P::Scalar>,
-		P: PackedExtension<FDomain> + RepackedExtension<PBase>,
-		P::Scalar: TowerField + ExtensionField<FDomain> + ExtensionField<PBase::Scalar>,
+		FBase: TowerField + ExtensionField<FDomain> + TryFrom<F>,
+		P: PackedExtension<F, PackedSubfield = P>
+			+ PackedExtension<FDomain, PackedSubfield: PackedFieldIndexable>
+			+ PackedExtension<FBase, PackedSubfield: PackedFieldIndexable>,
+		F: TowerField + ExtensionField<FDomain> + ExtensionField<FBase>,
 	{
-		let univariate_prover = sumcheck::prove::constraint_set_zerocheck_prover::<PBase, _, _, _>(
-			self.constraints,
-			self.multilinears,
-			self.domain_factory,
-			self.switchover_fn,
-			self.zerocheck_challenges,
-			self.backend,
-		)?;
+		let univariate_prover =
+			sumcheck::prove::constraint_set_zerocheck_prover::<_, _, FBase, _, _>(
+				self.constraints,
+				self.multilinears,
+				self.domain_factory,
+				self.switchover_fn,
+				self.zerocheck_challenges,
+				self.backend,
+			)?;
 
 		let type_erased_prover = if is_univariate(univariate_prover.n_vars()) {
 			let type_erased_univariate_prover =
@@ -531,7 +547,6 @@ where
 	}
 }
 
-#[allow(clippy::type_complexity)]
 #[instrument(skip_all, level = "debug")]
 fn make_unmasked_flush_witnesses<'a, U, Tower>(
 	oracles: &MultilinearOracleSet<FExt<Tower>>,
@@ -546,16 +561,14 @@ where
 	let flush_witnesses: Result<Vec<MultilinearWitness<'a, _>>, Error> = flush_oracle_ids
 		.par_iter()
 		.map(|&oracle_id| {
-			let MultilinearPolyOracle::LinearCombination {
-				linear_combination: lincom,
-				..
-			} = oracles.oracle(oracle_id)
+			let MultilinearPolyVariant::LinearCombination(lincom) =
+				oracles.oracle(oracle_id).variant
 			else {
 				unreachable!("make_flush_oracles adds linear combination oracles");
 			};
 			let polys = lincom
 				.polys()
-				.map(|oracle| witness.get_multilin_poly(oracle.id()))
+				.map(|id| witness.get_multilin_poly(id))
 				.collect::<Result<Vec<_>, _>>()?;
 
 			let packed_len = 1
@@ -595,7 +608,7 @@ fn make_fast_masked_flush_witnesses<'a, U, Tower>(
 	oracles: &MultilinearOracleSet<FExt<Tower>>,
 	witness: &MultilinearExtensionIndex<'a, U, FExt<Tower>>,
 	flush_oracles: &[OracleId],
-	flush_counts: Option<&[usize]>,
+	flush_selectors: Option<&[OracleId]>,
 ) -> Result<Vec<MultilinearWitness<'a, PackedType<U, FFastExt<Tower>>>>, Error>
 where
 	U: ProverTowerUnderlier<Tower>,
@@ -610,9 +623,6 @@ where
 		.enumerate()
 		.map(|(i, &flush_oracle_id)| {
 			let n_vars = oracles.n_vars(flush_oracle_id);
-			let flush_count = flush_counts.map_or(1 << n_vars, |flush_counts| flush_counts[i]);
-
-			debug_assert!(flush_count <= 1 << n_vars);
 
 			let log_width = <PackedType<U, FFastExt<Tower>>>::LOG_WIDTH;
 			let width = 1 << log_width;
@@ -621,13 +631,15 @@ where
 			let mut fast_ext_result = vec![PackedType::<U, FFastExt<Tower>>::one(); packed_len];
 
 			let poly = witness.get_multilin_poly(flush_oracle_id)?;
+			let selector = flush_selectors
+				.map(|flush_selectors| witness.get_multilin_poly(flush_selectors[i]))
+				.transpose()?;
 
 			const MAX_SUBCUBE_VARS: usize = 8;
 			let subcube_vars = MAX_SUBCUBE_VARS.min(n_vars);
-			let subcubes_count = flush_count.div_ceil(1 << subcube_vars);
 			let subcube_packed_size = 1 << subcube_vars.saturating_sub(log_width);
 
-			fast_ext_result[..subcube_packed_size * subcubes_count]
+			fast_ext_result
 				.par_chunks_mut(subcube_packed_size)
 				.enumerate()
 				.for_each(|(subcube_index, fast_subcube)| {
@@ -645,16 +657,29 @@ where
 						*underlier = PackedType::<U, FFastExt<Tower>>::to_underlier(dest);
 					}
 
-					let fast_subcube =
-						PackedType::<U, FFastExt<Tower>>::from_underliers_ref_mut(underliers);
-					if flush_count < (subcube_index + 1) << subcube_vars {
-						let offset = flush_count - (subcube_index << subcube_vars);
-						fast_subcube[offset.div_ceil(width)..].fill(PackedField::one());
+					if let Some(selector) = &selector {
+						let fast_subcube =
+							PackedType::<U, FFastExt<Tower>>::from_underliers_ref_mut(underliers);
 
-						let scalar_offset = offset % width;
-						if scalar_offset != 0 {
-							for j in scalar_offset..width {
-								fast_subcube[offset / width].set(j, FFastExt::<Tower>::ONE);
+						let mut ones_mask = PackedType::<U, FExt<Tower>>::default();
+						for (i, packed) in fast_subcube.iter_mut().enumerate() {
+							selector
+								.subcube_evals(
+									log_width,
+									(subcube_index << subcube_vars.saturating_sub(log_width)) | i,
+									0,
+									from_mut(&mut ones_mask),
+								)
+								.expect("selector n_vars equals flushed n_vars");
+
+							if ones_mask == PackedField::zero() {
+								*packed = PackedField::one();
+							} else if ones_mask != PackedField::one() {
+								for j in 0..width {
+									if ones_mask.get(j) == FExt::<Tower>::ZERO {
+										packed.set(j, FFastExt::<Tower>::ONE);
+									}
+								}
 							}
 						}
 					}
@@ -667,20 +692,22 @@ where
 		.collect()
 }
 
-#[allow(clippy::type_complexity)]
+pub struct FlushSumcheckProvers<Prover> {
+	provers: Vec<Prover>,
+	flush_oracle_ids_by_claim: Vec<Vec<OracleId>>,
+	flush_selectors_unique_by_claim: Vec<Vec<OracleId>>,
+}
+
 #[instrument(skip_all, level = "debug")]
 fn get_flush_sumcheck_provers<'a, 'b, U, Tower, FDomain, DomainFactory, Backend>(
 	oracles: &mut MultilinearOracleSet<Tower::B128>,
 	flush_oracle_ids: &[OracleId],
-	flush_counts: &[usize],
+	flush_selectors: &[OracleId],
 	final_layer_claims: &[LayerClaim<Tower::B128>],
 	witness: &mut MultilinearExtensionIndex<'a, U, Tower::B128>,
 	domain_factory: DomainFactory,
 	backend: &'b Backend,
-) -> Result<
-	(Vec<impl SumcheckProver<Tower::B128> + 'b>, Vec<Vec<StepDownMeta>>, Vec<Vec<OracleId>>),
-	Error,
->
+) -> Result<FlushSumcheckProvers<impl SumcheckProver<Tower::B128> + 'b>, Error>
 where
 	U: ProverTowerUnderlier<Tower> + PackScalar<FDomain>,
 	Tower: ProverTowerFamily,
@@ -694,32 +721,27 @@ where
 	let flush_sumcheck_metas = get_flush_dedup_sumcheck_metas(
 		oracles,
 		flush_oracle_ids,
-		flush_counts,
+		flush_selectors,
 		final_layer_claims,
 	)?;
 
 	let n_claims = flush_sumcheck_metas.len();
 	let mut provers = Vec::with_capacity(n_claims);
-	let mut flush_oracles_by_claim = Vec::with_capacity(n_claims);
-	let mut all_step_down_metas = Vec::with_capacity(n_claims);
+	let mut flush_oracle_ids_by_claim = Vec::with_capacity(n_claims);
+	let mut flush_selectors_unique_by_claim = Vec::with_capacity(n_claims);
 	for flush_sumcheck_meta in flush_sumcheck_metas {
 		let FlushSumcheckMeta {
 			composite_sum_claims,
-			step_down_metas,
+			flush_selectors_unique,
 			flush_oracle_ids,
 			eval_point,
 		} = flush_sumcheck_meta;
 
-		let mut multilinears = Vec::with_capacity(step_down_metas.len() + flush_oracle_ids.len());
+		let mut multilinears =
+			Vec::with_capacity(flush_selectors_unique.len() + flush_oracle_ids.len());
 
-		for meta in &step_down_metas {
-			let oracle_id = meta.step_down_oracle_id;
-
-			let step_down_multilinear =
-				MLEDirectAdapter::from(meta.step_down.multilinear_extension()?).upcast_arc_dyn();
-
-			witness.update_multilin_poly([(oracle_id, step_down_multilinear)])?;
-			multilinears.push(witness.get_multilin_poly(oracle_id)?);
+		for &flush_selector in &flush_selectors_unique {
+			multilinears.push(witness.get_multilin_poly(flush_selector)?);
 		}
 
 		for &oracle_id in &flush_oracle_ids {
@@ -736,9 +758,13 @@ where
 		)?;
 
 		provers.push(prover);
-		flush_oracles_by_claim.push(flush_oracle_ids);
-		all_step_down_metas.push(step_down_metas);
+		flush_oracle_ids_by_claim.push(flush_oracle_ids);
+		flush_selectors_unique_by_claim.push(flush_selectors_unique);
 	}
 
-	Ok((provers, all_step_down_metas, flush_oracles_by_claim))
+	Ok(FlushSumcheckProvers {
+		provers,
+		flush_selectors_unique_by_claim,
+		flush_oracle_ids_by_claim,
+	})
 }

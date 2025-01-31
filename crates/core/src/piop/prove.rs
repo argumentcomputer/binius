@@ -52,7 +52,7 @@ where
 {
 	// TODO: Parallelize the data copying
 	let mut packed_offset = 0;
-	let mut mle_iter = multilins.iter().rev().peekable();
+	let mut mle_iter = multilins.iter().rev();
 
 	// First copy all the polynomials where the number of elements is a multiple of the packing
 	// width.
@@ -169,7 +169,10 @@ where
 	F: TowerField + ExtensionField<FDomain> + ExtensionField<FEncode>,
 	FDomain: Field,
 	FEncode: BinaryField,
-	P: PackedFieldIndexable<Scalar = F> + PackedExtension<FDomain> + PackedExtension<FEncode>,
+	P: PackedFieldIndexable<Scalar = F>
+		+ PackedExtension<F, PackedSubfield = P>
+		+ PackedExtension<FDomain>
+		+ PackedExtension<FEncode>,
 	M: MultilinearPoly<P> + Send + Sync,
 	DomainFactory: EvaluationDomainFactory<FDomain>,
 	MTScheme: MerkleTreeScheme<F, Digest: SerializeBytes>,

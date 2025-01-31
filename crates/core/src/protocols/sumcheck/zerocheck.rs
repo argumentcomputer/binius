@@ -29,7 +29,7 @@ where
 		n_multilinears: usize,
 		composite_zeros: Vec<Composition>,
 	) -> Result<Self, Error> {
-		for composition in composite_zeros.iter() {
+		for composition in &composite_zeros {
 			if composition.n_vars() != n_multilinears {
 				bail!(Error::InvalidComposition {
 					actual: composition.n_vars(),
@@ -68,7 +68,7 @@ pub fn reduce_to_sumchecks<F: Field, Composition: CompositionPolyOS<F>>(
 		bail!(Error::ClaimsOutOfOrder);
 	}
 
-	let sumcheck_claims = claims
+	claims
 		.iter()
 		.map(|zerocheck_claim| {
 			let ZerocheckClaim {
@@ -89,9 +89,7 @@ pub fn reduce_to_sumchecks<F: Field, Composition: CompositionPolyOS<F>>(
 					.collect(),
 			)
 		})
-		.collect::<Result<Vec<_>, _>>()?;
-
-	Ok(sumcheck_claims)
+		.collect()
 }
 
 /// Verify the validity of the sumcheck outputs for a reduced zerocheck.
@@ -197,8 +195,8 @@ mod tests {
 	use std::{iter, sync::Arc};
 
 	use binius_field::{
-		BinaryField128b, BinaryField8b, ExtensionField, PackedBinaryField1x128b,
-		PackedBinaryField4x32b, PackedExtension, PackedFieldIndexable, RepackedExtension,
+		BinaryField128b, BinaryField32b, BinaryField8b, ExtensionField, PackedBinaryField1x128b,
+		PackedExtension, PackedFieldIndexable, PackedSubfield, RepackedExtension,
 	};
 	use binius_hal::{make_portable_backend, ComputationBackend, ComputationBackendExt};
 	use binius_math::{
@@ -278,13 +276,16 @@ mod tests {
 		switchover_rd: usize,
 	) {
 		type P = PackedBinaryField1x128b;
-		type PBase = PackedBinaryField4x32b;
+		type FBase = BinaryField32b;
 		type FDomain = BinaryField8b;
 		let mut rng = StdRng::seed_from_u64(0);
 
 		// Setup ZC Witness
-		let multilins =
-			generate_zero_product_multilinears::<PBase, P>(&mut rng, n_vars, n_multilinears);
+		let multilins = generate_zero_product_multilinears::<PackedSubfield<P, FBase>, P>(
+			&mut rng,
+			n_vars,
+			n_multilinears,
+		);
 
 		let binding = [("test_product".into(), TestProductComposition::new(n_multilinears))];
 		zerocheck::validate_witness(&multilins, &binding).unwrap();
@@ -309,7 +310,7 @@ mod tests {
 		} = batch_prove(vec![reference_prover], &mut prove_transcript_1).unwrap();
 
 		let composition = TestProductComposition::new(n_multilinears);
-		let optimized_prover = UnivariateZerocheck::<FDomain, PBase, P, _, _, _, _>::new(
+		let optimized_prover = UnivariateZerocheck::<FDomain, FBase, P, _, _, _, _>::new(
 			multilins,
 			[("test_product".into(), composition.clone(), composition)],
 			&challenges,
@@ -339,13 +340,16 @@ mod tests {
 		switchover_rd: usize,
 	) {
 		type P = PackedBinaryField1x128b;
-		type PBase = PackedBinaryField4x32b;
+		type FBase = BinaryField32b;
 		type FE = BinaryField128b;
 		type FDomain = BinaryField8b;
 		let mut rng = StdRng::seed_from_u64(0);
 
-		let multilins =
-			generate_zero_product_multilinears::<PBase, P>(&mut rng, n_vars, n_multilinears);
+		let multilins = generate_zero_product_multilinears::<PackedSubfield<P, FBase>, P>(
+			&mut rng,
+			n_vars,
+			n_multilinears,
+		);
 
 		let binding = [("test_product".into(), TestProductComposition::new(n_multilinears))];
 		zerocheck::validate_witness(&multilins, &binding).unwrap();
@@ -357,7 +361,7 @@ mod tests {
 		let backend = make_portable_backend();
 
 		let composition = TestProductComposition::new(n_multilinears);
-		let prover = UnivariateZerocheck::<FDomain, PBase, P, _, _, _, _>::new(
+		let prover = UnivariateZerocheck::<FDomain, FBase, P, _, _, _, _>::new(
 			multilins.clone(),
 			[("test_product".into(), composition.clone(), composition)],
 			&challenges,

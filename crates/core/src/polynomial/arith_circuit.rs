@@ -4,7 +4,10 @@ use std::{fmt::Debug, mem::MaybeUninit, sync::Arc};
 
 use binius_field::{ExtensionField, Field, PackedField, TowerField};
 use binius_math::{ArithExpr, CompositionPoly, CompositionPolyOS, Error};
-use stackalloc::{helpers::slice_assume_init, stackalloc_uninit};
+use stackalloc::{
+	helpers::{slice_assume_init, slice_assume_init_mut},
+	stackalloc_uninit,
+};
 
 use super::MultivariatePoly;
 
@@ -21,12 +24,26 @@ fn circuit_steps_for_expr<F: Field>(
 		match expr {
 			ArithExpr::Const(value) => CircuitStepArgument::Const(*value),
 			ArithExpr::Var(index) => CircuitStepArgument::Expr(CircuitNode::Var(*index)),
-			ArithExpr::Add(left, right) => {
-				let left = to_circuit_inner(left, result);
-				let right = to_circuit_inner(right, result);
-				result.push(CircuitStep::Add(left, right));
-				CircuitStepArgument::Expr(CircuitNode::Slot(result.len() - 1))
-			}
+			ArithExpr::Add(left, right) => match &**right {
+				ArithExpr::Mul(mleft, mright) if left.is_composite() => {
+					// Only handling e1 + (e2 * e3), not (e1 * e2) + e3, as latter was not observed in practice
+					// (the former can be enforced by rewriting expression).
+					let left = to_circuit_inner(left, result);
+					let CircuitStepArgument::Expr(CircuitNode::Slot(left)) = left else {
+						unreachable!("guaranteed by `is_composite` check above")
+					};
+					let mleft = to_circuit_inner(mleft, result);
+					let mright = to_circuit_inner(mright, result);
+					result.push(CircuitStep::AddMul(left, mleft, mright));
+					CircuitStepArgument::Expr(CircuitNode::Slot(left))
+				}
+				_ => {
+					let left = to_circuit_inner(left, result);
+					let right = to_circuit_inner(right, result);
+					result.push(CircuitStep::Add(left, right));
+					CircuitStepArgument::Expr(CircuitNode::Slot(result.len() - 1))
+				}
+			},
 			ArithExpr::Mul(left, right) => {
 				let left = to_circuit_inner(left, result);
 				let right = to_circuit_inner(right, result);
@@ -41,7 +58,7 @@ fn circuit_steps_for_expr<F: Field>(
 		}
 	}
 
-	let ret = to_circuit_inner(expr, &mut steps);
+	let ret = to_circuit_inner(&expr.optimize(), &mut steps);
 	(steps, ret)
 }
 
@@ -64,8 +81,8 @@ impl CircuitNode {
 		row_len: usize,
 	) -> &'a [P] {
 		match self {
-			CircuitNode::Var(index) => inputs[*index],
-			CircuitNode::Slot(slot) => &evals[slot * row_len..(slot + 1) * row_len],
+			Self::Var(index) => inputs[*index],
+			Self::Slot(slot) => &evals[slot * row_len..(slot + 1) * row_len],
 		}
 	}
 }
@@ -85,6 +102,7 @@ enum CircuitStep<F: Field> {
 	Add(CircuitStepArgument<F>, CircuitStepArgument<F>),
 	Mul(CircuitStepArgument<F>, CircuitStepArgument<F>),
 	Pow(CircuitStepArgument<F>, u64),
+	AddMul(usize, CircuitStepArgument<F>, CircuitStepArgument<F>),
 }
 
 /// Describes polynomial evaluations using a directed acyclic graph of expressions.
@@ -166,6 +184,14 @@ impl<F: TowerField> CompositionPoly<F> for ArithCircuitPoly<F> {
 			});
 		}
 
+		fn write_result<T>(target: &mut [MaybeUninit<T>], value: T) {
+			// Safety: The index is guaranteed to be within bounds because
+			// we initialize at least `self.steps.len()` using `stackalloc`.
+			unsafe {
+				target.get_unchecked_mut(0).write(value);
+			}
+		}
+
 		// `stackalloc_uninit` throws a debug assert if `size` is 0, so set minimum of 1.
 		stackalloc_uninit::<P, _, _>(self.steps.len().max(1), |evals| {
 			let get_argument_value = |input: CircuitStepArgument<F>, evals: &[P]| match input {
@@ -181,27 +207,33 @@ impl<F: TowerField> CompositionPoly<F> for ArithCircuitPoly<F> {
 			};
 
 			for (i, expr) in self.steps.iter().enumerate() {
-				// Safety: previous evaluations are initialized by the previous loop iterations
+				// Safety: previous evaluations are initialized by the previous loop iterations (if dereferenced)
 				let (before, after) = unsafe { evals.split_at_mut_unchecked(i) };
-				let before = unsafe { slice_assume_init(before) };
-				let new_val = match expr {
-					CircuitStep::Add(x, y) => {
-						get_argument_value(*x, before) + get_argument_value(*y, before)
+				let before = unsafe { slice_assume_init_mut(before) };
+				match expr {
+					CircuitStep::Add(x, y) => write_result(
+						after,
+						get_argument_value(*x, before) + get_argument_value(*y, before),
+					),
+					CircuitStep::AddMul(target_slot, x, y) => {
+						let intermediate =
+							get_argument_value(*x, before) * get_argument_value(*y, before);
+						// Safety: we know by evaluation order and construction of steps that `target.slot` is initialized
+						let target_slot = unsafe { before.get_unchecked_mut(*target_slot) };
+						*target_slot += intermediate;
 					}
-					CircuitStep::Mul(x, y) => {
-						get_argument_value(*x, before) * get_argument_value(*y, before)
+					CircuitStep::Mul(x, y) => write_result(
+						after,
+						get_argument_value(*x, before) * get_argument_value(*y, before),
+					),
+					CircuitStep::Pow(id, exp) => {
+						write_result(after, get_argument_value(*id, before).pow(*exp))
 					}
-					CircuitStep::Pow(id, exp) => pow(get_argument_value(*id, before), *exp),
 				};
-
-				// Safety: `evals.len()` == `self.exprs.len()`, so `after` is guaranteed to have at least one element
-				unsafe {
-					after.get_unchecked_mut(0).write(new_val);
-				}
 			}
 
-			// Safety: `evals.len()` == `self.exprs.len()`, and all expression evaluations have
-			// been initialized
+			// Some slots in `evals` might be empty, but we're guaranted that
+			// if `self.retval` points to a slot, that this slot is initialized.
 			unsafe {
 				let evals = slice_assume_init(evals);
 				Ok(get_argument_value(self.retval, evals))
@@ -224,8 +256,8 @@ impl<F: TowerField> CompositionPoly<F> for ArithCircuitPoly<F> {
 			for (i, expr) in self.steps.iter().enumerate() {
 				let (before, current) = sparse_evals.split_at_mut(i * row_len);
 
-				// Safety: `before` is guaranteed to be initialized by the previous loop iterations.
-				let before = unsafe { slice_assume_init(before) };
+				// Safety: `before` is guaranteed to be initialized by the previous loop iterations (if dereferenced).
+				let before = unsafe { slice_assume_init_mut(before) };
 				let current = &mut current[..row_len];
 
 				match expr {
@@ -261,13 +293,13 @@ impl<F: TowerField> CompositionPoly<F> for ArithCircuitPoly<F> {
 								unsafe {
 									current
 										.get_unchecked_mut(j)
-										.write(pow(*id.get_unchecked(j), *exp));
+										.write(id.get_unchecked(j).pow(*exp));
 								}
 							}
 						}
 						CircuitStepArgument::Const(id) => {
 							let id: P = P::broadcast((*id).into());
-							let result = pow(id, *exp);
+							let result = id.pow(*exp);
 							for j in 0..row_len {
 								// Safety: `current` has length equal to `row_len`
 								unsafe {
@@ -276,6 +308,30 @@ impl<F: TowerField> CompositionPoly<F> for ArithCircuitPoly<F> {
 							}
 						}
 					},
+					CircuitStep::AddMul(target, left, right) => {
+						let target = &before[row_len * target..(target + 1) * row_len];
+						// Safety: by construction of steps and evaluation order we know
+						// that `target` is not borrowed elsewhere.
+						let target: &mut [MaybeUninit<P>] = unsafe {
+							std::slice::from_raw_parts_mut(
+								target.as_ptr() as *mut MaybeUninit<P>,
+								target.len(),
+							)
+						};
+						apply_binary_op(
+							left,
+							right,
+							batch_query,
+							before,
+							target,
+							// Safety: by construction of steps and evaluation order we know
+							// that `target`/`out` is initialized.
+							|left, right, out| unsafe {
+								let out = out.assume_init_mut();
+								*out += left * right;
+							},
+						);
+					}
 				}
 			}
 
@@ -403,17 +459,6 @@ fn apply_binary_op<F: Field, P: PackedField<Scalar: ExtensionField<F>>>(
 			}
 		}
 	}
-}
-
-fn pow<P: PackedField>(value: P, exp: u64) -> P {
-	let mut res = P::one();
-	for i in (0..64).rev() {
-		res = res.square();
-		if ((exp >> i) & 1) == 1 {
-			res.mul_assign(value)
-		}
-	}
-	res
 }
 
 #[cfg(test)]
@@ -602,5 +647,121 @@ mod tests {
 		)
 		.unwrap();
 		assert_eq!(&batch_result, &[expected1, expected2, expected3]);
+	}
+
+	#[test]
+	fn test_const_fold() {
+		type F = BinaryField8b;
+		type P = PackedBinaryField8x16b;
+
+		// x0 * ((122 * 123) + (124 + 125)) + x1
+		let expr = ArithExpr::Var(0)
+			* ((ArithExpr::Const(F::new(122)) * ArithExpr::Const(F::new(123)))
+				+ (ArithExpr::Const(F::new(124)) + ArithExpr::Const(F::new(125))))
+			+ ArithExpr::Var(1);
+		let circuit = ArithCircuitPoly::<F>::new(expr);
+		assert_eq!(circuit.steps.len(), 2);
+
+		let typed_circuit: &dyn CompositionPolyOS<P> = &circuit;
+		assert_eq!(typed_circuit.binary_tower_level(), F::TOWER_LEVEL);
+		assert_eq!(typed_circuit.degree(), 1);
+		assert_eq!(typed_circuit.n_vars(), 2);
+
+		// test evaluate
+		assert_eq!(
+			CompositionPoly::evaluate(
+				&circuit,
+				&[
+					P::from_scalars(felts!(BinaryField16b[0, 1, 2, 3, 4, 5, 6, 7])),
+					P::from_scalars(felts!(BinaryField16b[100, 101, 102, 103, 104, 105, 106, 107])),
+				]
+			)
+			.unwrap(),
+			P::from_scalars(felts!(BinaryField16b[100, 49, 206, 155, 177, 228, 27, 78])),
+		);
+
+		// test batch evaluate
+		let query1 = &[
+			P::from_scalars(felts!(BinaryField16b[0, 0, 0, 0, 0, 0, 0, 0])),
+			P::from_scalars(felts!(BinaryField16b[0, 0, 0, 0, 0, 0, 0, 0])),
+		];
+		let query2 = &[
+			P::from_scalars(felts!(BinaryField16b[1, 1, 1, 1, 1, 1, 1, 1])),
+			P::from_scalars(felts!(BinaryField16b[0, 1, 2, 3, 4, 5, 6, 7])),
+		];
+		let query3 = &[
+			P::from_scalars(felts!(BinaryField16b[0, 1, 2, 3, 4, 5, 6, 7])),
+			P::from_scalars(felts!(BinaryField16b[100, 101, 102, 103, 104, 105, 106, 107])),
+		];
+		let expected1 = P::from_scalars(felts!(BinaryField16b[0, 0, 0, 0, 0, 0, 0, 0]));
+		let expected2 = P::from_scalars(felts!(BinaryField16b[84, 85, 86, 87, 80, 81, 82, 83]));
+		let expected3 =
+			P::from_scalars(felts!(BinaryField16b[100, 49, 206, 155, 177, 228, 27, 78]));
+
+		let mut batch_result = vec![P::zero(); 3];
+		CompositionPoly::batch_evaluate(
+			&circuit,
+			&[
+				&[query1[0], query2[0], query3[0]],
+				&[query1[1], query2[1], query3[1]],
+			],
+			&mut batch_result,
+		)
+		.unwrap();
+		assert_eq!(&batch_result, &[expected1, expected2, expected3]);
+	}
+
+	#[test]
+	fn test_pow_const_fold() {
+		type F = BinaryField8b;
+		type P = PackedBinaryField8x16b;
+
+		// x0 + 2^5
+		let expr = ArithExpr::Var(0) + ArithExpr::Const(F::from(2)).pow(4);
+		let circuit = ArithCircuitPoly::<F>::new(expr);
+		assert_eq!(circuit.steps.len(), 1);
+
+		let typed_circuit: &dyn CompositionPolyOS<P> = &circuit;
+		assert_eq!(typed_circuit.binary_tower_level(), F::TOWER_LEVEL);
+		assert_eq!(typed_circuit.degree(), 1);
+		assert_eq!(typed_circuit.n_vars(), 1);
+
+		assert_eq!(
+			CompositionPoly::evaluate(
+				&circuit,
+				&[P::from_scalars(
+					felts!(BinaryField16b[0, 1, 2, 3, 122, 123, 124, 125]),
+				)]
+			)
+			.unwrap(),
+			P::from_scalars(felts!(BinaryField16b[2, 3, 0, 1, 120, 121, 126, 127])),
+		);
+	}
+
+	#[test]
+	fn test_pow_nested() {
+		type F = BinaryField8b;
+		type P = PackedBinaryField8x16b;
+
+		// ((x0^2)^3)^4
+		let expr = ArithExpr::Var(0).pow(2).pow(3).pow(4);
+		let circuit = ArithCircuitPoly::<F>::new(expr);
+		assert_eq!(circuit.steps.len(), 1);
+
+		let typed_circuit: &dyn CompositionPolyOS<P> = &circuit;
+		assert_eq!(typed_circuit.binary_tower_level(), F::TOWER_LEVEL);
+		assert_eq!(typed_circuit.degree(), 24);
+		assert_eq!(typed_circuit.n_vars(), 1);
+
+		assert_eq!(
+			CompositionPoly::evaluate(
+				&circuit,
+				&[P::from_scalars(
+					felts!(BinaryField16b[0, 1, 2, 3, 122, 123, 124, 125]),
+				)]
+			)
+			.unwrap(),
+			P::from_scalars(felts!(BinaryField16b[0, 1, 1, 1, 20, 152, 41, 170])),
+		);
 	}
 }

@@ -275,7 +275,7 @@ mod tests {
 
 		let mut several_u32_add = SeveralU32add::new(&mut builder).unwrap();
 
-		[11, 12, 13].into_iter().for_each(|log_size| {
+		for log_size in [11, 12, 13] {
 			// BinaryField8b is used here because we utilize an 8x8x1→8 table
 			let add_a_u8 =
 				unconstrained::<_, _, BinaryField8b>(&mut builder, "add_a", log_size).unwrap();
@@ -289,7 +289,7 @@ mod tests {
 					add_b_u8,
 				)
 				.unwrap();
-		});
+		}
 
 		several_u32_add
 			.finalize(&mut builder, "lasso_u32add")
@@ -543,6 +543,8 @@ mod tests {
 			multiplicity: 1,
 		};
 
+		let boundaries = vec![pull_boundaries, push_boundaries];
+
 		let even = builder.add_committed("even", log_size, 3);
 
 		let half = builder.add_committed("half", log_size, 3);
@@ -589,10 +591,18 @@ mod tests {
 			}
 		}
 
-		builder.flush(FlushDirection::Pull, channel_id, even_counter, [even]);
-		builder.flush(FlushDirection::Push, channel_id, even_counter, [half]);
-		builder.flush(FlushDirection::Pull, channel_id, odd_counter, [odd]);
-		builder.flush(FlushDirection::Push, channel_id, odd_counter, [output]);
+		builder
+			.flush(FlushDirection::Pull, channel_id, even_counter, [even])
+			.unwrap();
+		builder
+			.flush(FlushDirection::Push, channel_id, even_counter, [half])
+			.unwrap();
+		builder
+			.flush(FlushDirection::Pull, channel_id, odd_counter, [odd])
+			.unwrap();
+		builder
+			.flush(FlushDirection::Push, channel_id, odd_counter, [output])
+			.unwrap();
 
 		let witness = builder
 			.take_witness()
@@ -611,7 +621,7 @@ mod tests {
 			Groestl256ByteCompression,
 			HasherChallenger<Groestl256>,
 			_,
-		>(&constraint_system, 1, 10, witness, &domain_factory, &backend)
+		>(&constraint_system, 1, 10, &boundaries, witness, &domain_factory, &backend)
 		.unwrap();
 
 		constraint_system::verify::<
@@ -620,7 +630,7 @@ mod tests {
 			Groestl256,
 			Groestl256ByteCompression,
 			HasherChallenger<Groestl256>,
-		>(&constraint_system, 1, 10, vec![pull_boundaries, push_boundaries], proof)
+		>(&constraint_system, 1, 10, &boundaries, proof)
 		.unwrap();
 	}
 
@@ -636,7 +646,7 @@ mod tests {
 			let allocator = bumpalo::Bump::new();
 			let mut builder = ConstraintSystemBuilder::<U, F>::new_with_witness(&allocator);
 
-			let _boundary = plain_lookup::test_plain_lookup::test_u8_mul_lookup::<
+			let boundary = plain_lookup::test_plain_lookup::test_u8_mul_lookup::<
 				_,
 				_,
 				MAX_LOG_MULTIPLICITY,
@@ -658,7 +668,15 @@ mod tests {
 				Groestl256ByteCompression,
 				HasherChallenger<Groestl256>,
 				_,
-			>(&constraint_system, log_inv_rate, security_bits, witness, &domain_factory, &backend)
+			>(
+				&constraint_system,
+				log_inv_rate,
+				security_bits,
+				&[boundary],
+				witness,
+				&domain_factory,
+				&backend,
+			)
 			.unwrap()
 		};
 
@@ -681,7 +699,7 @@ mod tests {
 				Groestl256,
 				Groestl256ByteCompression,
 				HasherChallenger<Groestl256>,
-			>(&constraint_system, log_inv_rate, security_bits, vec![boundary], proof)
+			>(&constraint_system, log_inv_rate, security_bits, &[boundary], proof)
 			.unwrap();
 		}
 	}

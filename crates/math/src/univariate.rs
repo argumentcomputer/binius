@@ -53,11 +53,10 @@ impl<F: BinaryField> EvaluationDomainFactory<F> for DefaultEvaluationDomainFacto
 	}
 }
 
-impl<FSrc: BinaryField, FTgt: BinaryField> EvaluationDomainFactory<FTgt>
-	for IsomorphicEvaluationDomainFactory<FSrc>
+impl<FSrc, FTgt> EvaluationDomainFactory<FTgt> for IsomorphicEvaluationDomainFactory<FSrc>
 where
 	FSrc: BinaryField,
-	FTgt: Field + From<FSrc>,
+	FTgt: Field + From<FSrc> + BinaryField,
 {
 	fn create(&self, size: usize) -> Result<EvaluationDomain<FTgt>, Error> {
 		let points = make_evaluation_points(&self.subspace, size)?;
@@ -77,7 +76,7 @@ fn make_evaluation_points<F: BinaryField>(
 }
 
 impl<F: Field> From<EvaluationDomain<F>> for InterpolationDomain<F> {
-	fn from(evaluation_domain: EvaluationDomain<F>) -> InterpolationDomain<F> {
+	fn from(evaluation_domain: EvaluationDomain<F>) -> Self {
 		let n = evaluation_domain.size();
 		let evaluation_matrix = vandermonde(evaluation_domain.points());
 		let mut interpolation_matrix = Matrix::zeros(n, n);
@@ -90,7 +89,7 @@ impl<F: Field> From<EvaluationDomain<F>> for InterpolationDomain<F> {
 				matrix is non-singular because it is Vandermonde with no duplicate points",
 			);
 
-		InterpolationDomain {
+		Self {
 			evaluation_domain,
 			interpolation_matrix,
 		}
@@ -219,9 +218,9 @@ where
 /// Evaluate a univariate polynomial specified by its monomial coefficients.
 pub fn evaluate_univariate<F: Field>(coeffs: &[F], x: F) -> F {
 	// Evaluate using Horner's method
-	let mut rev_coeffs = coeffs.iter().copied().rev();
-	let last_coeff = rev_coeffs.next().unwrap_or(F::ZERO);
-	rev_coeffs.fold(last_coeff, |eval, coeff| eval * x + coeff)
+	coeffs
+		.iter()
+		.rfold(F::ZERO, |eval, &coeff| eval * x + coeff)
 }
 
 fn compute_barycentric_weights<F: Field>(points: &[F]) -> Result<Vec<F>, Error> {
@@ -270,7 +269,7 @@ mod tests {
 		coeffs
 			.iter()
 			.enumerate()
-			.map(|(i, &coeff)| coeff * x.pow(slice::from_ref(&(i as u64))))
+			.map(|(i, &coeff)| coeff * Field::pow(&x, slice::from_ref(&(i as u64))))
 			.sum()
 	}
 

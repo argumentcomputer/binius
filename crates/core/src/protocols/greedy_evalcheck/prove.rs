@@ -49,7 +49,7 @@ where
 	let evalcheck_proofs = evalcheck_prover.prove(claims)?;
 	write_u64(&mut transcript.decommitment(), evalcheck_proofs.len() as u64);
 	let mut writer = transcript.message();
-	for evalcheck_proof in evalcheck_proofs.iter() {
+	for evalcheck_proof in &evalcheck_proofs {
 		serialize_evalcheck_proof(&mut writer, evalcheck_proof)
 	}
 
@@ -62,7 +62,6 @@ where
 		// Reduce the new sumcheck claims for virtual polynomial openings to new evalcheck claims.
 		let new_evalcheck_claims =
 			prove_bivariate_sumchecks_with_switchover::<_, _, DomainField, _, _>(
-				evalcheck_prover.oracles,
 				evalcheck_prover.witness_index,
 				new_sumchecks,
 				transcript,
@@ -74,7 +73,7 @@ where
 		let new_evalcheck_proofs = evalcheck_prover.prove(new_evalcheck_claims)?;
 
 		let mut writer = transcript.message();
-		for evalcheck_proof in new_evalcheck_proofs.iter() {
+		for evalcheck_proof in &new_evalcheck_proofs {
 			serialize_evalcheck_proof(&mut writer, evalcheck_proof);
 		}
 	}

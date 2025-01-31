@@ -2,20 +2,20 @@
 
 use std::sync::Arc;
 
-use binius_field::Field;
+use binius_field::TowerField;
 use binius_math::CompositionPolyOS;
 use binius_utils::bail;
 
 use crate::oracle::{Error, MultilinearPolyOracle, OracleId};
 
 #[derive(Debug, Clone)]
-pub struct CompositePolyOracle<F: Field> {
+pub struct CompositePolyOracle<F: TowerField> {
 	n_vars: usize,
 	inner: Vec<MultilinearPolyOracle<F>>,
 	composition: Arc<dyn CompositionPolyOS<F>>,
 }
 
-impl<F: Field> CompositePolyOracle<F> {
+impl<F: TowerField> CompositePolyOracle<F> {
 	pub fn new<C: CompositionPolyOS<F> + 'static>(
 		n_vars: usize,
 		inner: Vec<MultilinearPolyOracle<F>>,
@@ -24,7 +24,7 @@ impl<F: Field> CompositePolyOracle<F> {
 		if inner.len() != composition.n_vars() {
 			bail!(Error::CompositionMismatch);
 		}
-		for poly in inner.iter() {
+		for poly in &inner {
 			if poly.n_vars() != n_vars {
 				bail!(Error::IncorrectNumberOfVariables { expected: n_vars });
 			}
@@ -55,7 +55,7 @@ impl<F: Field> CompositePolyOracle<F> {
 		)
 	}
 
-	pub fn n_vars(&self) -> usize {
+	pub const fn n_vars(&self) -> usize {
 		self.n_vars
 	}
 
@@ -156,7 +156,7 @@ mod tests {
 				oracles.oracle(poly_8b),
 				oracles.oracle(poly_32b),
 			],
-			composition.clone(),
+			composition,
 		)
 		.unwrap();
 		assert_eq!(composite.binary_tower_level(), BinaryField32b::TOWER_LEVEL);

@@ -33,13 +33,16 @@ impl StepDown {
 				arg: "index".into(),
 				range: 0..(1 << n_vars) + 1,
 			})
-		} else {
-			Ok(Self { n_vars, index })
 		}
+		Ok(Self { n_vars, index })
 	}
 
-	pub fn n_vars(&self) -> usize {
+	pub const fn n_vars(&self) -> usize {
 		self.n_vars
+	}
+
+	pub const fn index(&self) -> usize {
+		self.index
 	}
 
 	pub fn multilinear_extension<P: PackedField>(&self) -> Result<MultilinearExtension<P>, Error> {

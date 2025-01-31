@@ -3,12 +3,12 @@
 use std::iter::repeat_with;
 
 use binius_field::{ExtensionField, PackedBinaryField128x1b, PackedBinaryField1x128b, PackedField};
-use binius_math::fold;
+use binius_math::fold_right;
 use criterion::{
 	criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, Criterion,
 };
 
-fn packed_size<P: PackedField>(log_size: usize) -> usize {
+const fn packed_size<P: PackedField>(log_size: usize) -> usize {
 	(1usize << log_size).div_ceil(P::WIDTH)
 }
 
@@ -33,7 +33,7 @@ fn bench_fold<P, PE>(
 
 	group.throughput(criterion::Throughput::Elements((P::WIDTH << log_evals_size) as u64));
 	group.bench_function(format!("{log_evals_size}x{log_query_size}"), |bench| {
-		bench.iter(|| fold(&evals, log_evals_size, &query, log_query_size, &mut out));
+		bench.iter(|| fold_right(&evals, log_evals_size, &query, log_query_size, &mut out));
 	});
 }
 
