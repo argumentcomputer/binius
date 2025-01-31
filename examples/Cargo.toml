@@ -88,6 +88,10 @@ path = "acc-linear-combination-with-offset.rs"
 name = "acc-shifted"
 path = "acc-shifted.rs"
 
+[[example]]
+name = "acc-packed"
+path = "acc-packed.rs"
+
 [lints.clippy]
 needless_range_loop = "allow"
 
