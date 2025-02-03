@@ -11,6 +11,8 @@ type F128 = BinaryField128b;
 type F8 = BinaryField8b;
 type F1 = BinaryField1b;
 
+// FIXME: Following gadgets are unconstrained. Only for demonstrative purpose, don't use in production
+
 fn bytes_decomposition_gadget(
 	builder: &mut ConstraintSystemBuilder<U, F128>,
 	name: impl ToString,
