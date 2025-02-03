@@ -74,6 +74,8 @@ const AES_AFFINE_TRANSFORMATION: [F8; 8] = [
 	F8::new(0b10001111),
 ];
 
+// FIXME: Following gadget is unconstrained. Only for demonstrative purpose, don't use in production
+
 fn main() {
 	let allocator = bumpalo::Bump::new();
 	let mut builder = ConstraintSystemBuilder::<U, F128>::new_with_witness(&allocator);
