@@ -92,6 +92,10 @@ path = "acc-shifted.rs"
 name = "acc-packed"
 path = "acc-packed.rs"
 
+[[example]]
+name = "acc-projected"
+path = "acc-projected.rs"
+
 [lints.clippy]
 needless_range_loop = "allow"
 
