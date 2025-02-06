@@ -19,6 +19,8 @@ const LOG_SIZE: usize = 8;
 // it creates column with some input bytes written and then creates one more 'Repeated' column
 // where the same bytes are copied multiple times.
 fn bytes_repeat_gadget(builder: &mut ConstraintSystemBuilder<U, F128>) {
+	builder.push_namespace("bytes_repeat_gadget");
+
 	let bytes = unconstrained::<U, F128, F8>(builder, "input", LOG_SIZE).unwrap();
 
 	let repeat_times_log = 4usize;
@@ -42,6 +44,8 @@ fn bytes_repeat_gadget(builder: &mut ConstraintSystemBuilder<U, F128>) {
 			repeating_values[start..end].copy_from_slice(input_values);
 		}
 	}
+
+	builder.pop_namespace();
 }
 
 // Bit-oriented repeating is more elaborated due to a specifics of memory layout in Binius.
@@ -54,6 +58,8 @@ fn bytes_repeat_gadget(builder: &mut ConstraintSystemBuilder<U, F128>) {
 // Proper writing bits requires separate iterating over PackedBinaryField128x1b elements and input bytes
 // with extracting particular bit values from the input and setting appropriate bit in a given PackedBinaryField128x1b.
 fn bits_repeat_gadget(builder: &mut ConstraintSystemBuilder<U, F128>) {
+	builder.push_namespace("bits_repeat_gadget");
+
 	let bits = unconstrained::<U, F128, F1>(builder, "input", LOG_SIZE).unwrap();
 	let repeat_times_log = 2usize;
 
@@ -99,6 +105,8 @@ fn bits_repeat_gadget(builder: &mut ConstraintSystemBuilder<U, F128>) {
 			offset += input_values.len() * 8;
 		}
 	}
+
+	builder.pop_namespace();
 }
 
 fn main() {

@@ -100,6 +100,10 @@ path = "acc-projected.rs"
 name = "acc-repeated"
 path = "acc-repeated.rs"
 
+[[example]]
+name = "acc-zeropadded"
+path = "acc-zeropadded.rs"
+
 [lints.clippy]
 needless_range_loop = "allow"
 
