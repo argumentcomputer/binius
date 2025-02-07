@@ -151,6 +151,70 @@ where
 	Ok(zout)
 }
 
+// Gadget that adds three u32 at once
+pub fn add3<U, F>(
+	builder: &mut ConstraintSystemBuilder<U, F>,
+	name: impl ToString,
+	xin: OracleId,
+	yin: OracleId,
+	zin: OracleId,
+	flags: super::Flags,
+) -> Result<OracleId, anyhow::Error>
+	where
+		U: PackScalar<F> + PackScalar<BinaryField1b> + Pod,
+		F: TowerField,
+{
+	builder.push_namespace(name);
+	let log_rows = builder.log_rows([xin, yin, zin])?;
+	let left = builder.add_linear_combination(
+		"left",
+		log_rows,
+		[(xin, F::ONE), (yin, F::ONE), (zin, F::ONE)],
+	)?;
+	let right = builder.add_committed("right", log_rows, BinaryField1b::TOWER_LEVEL);
+
+	if let Some(witness) = builder.witness() {
+		let x_vals = witness.get::<BinaryField1b>(xin)?.as_slice::<u32>();
+		let y_vals = witness.get::<BinaryField1b>(yin)?.as_slice::<u32>();
+		let z_vals = witness.get::<BinaryField1b>(zin)?.as_slice::<u32>();
+
+		let mut left_values = witness.new_column::<BinaryField1b>(left);
+		let mut right_values = witness.new_column::<BinaryField1b>(right);
+
+		// In order to reduce our task to a simpler two integers addition (that we have gadget for) we use a trick from
+		// https://stackoverflow.com/questions/26228262/how-does-this-function-sum-3-integers-using-only-bit-wise-operators
+		(x_vals, y_vals, z_vals, left_values.as_mut_slice(), right_values.as_mut_slice())
+			.into_par_iter()
+			.for_each(|(x, y, z, left, right)| {
+				*left = (*x ^ *y) ^ *z;
+				*right = (*x) & (*y) | (*x) & (*z) | (*y & *z);
+			});
+	}
+
+	// right << 1
+	let right_shifted = shl(builder, "right_shifted", right, 1)?;
+
+	builder.assert_zero(
+		"left",
+		[xin, yin, zin, left],
+		arith_expr!([x, y, z, left] = x + y + z - left).convert_field(),
+	);
+
+	// We apply following rule: a OR b = a XOR b XOR (a AND B) to the expression of 'right' column defined above.
+	builder.assert_zero(
+		"right",
+		[xin, yin, zin, right],
+		arith_expr!(
+			[x, y, z, right] =
+				x * (y + z) + y * z * (1 + x * (1 + (y + z + x * y * z))) - right
+		)
+			.convert_field(),
+	);
+
+	builder.pop_namespace();
+	add(builder, "add3 -> add2", left, right_shifted, flags)
+}
+
 pub fn sub<U, F>(
 	builder: &mut ConstraintSystemBuilder<U, F>,
 	name: impl ToString,
