@@ -16,7 +16,7 @@ use itertools::izip;
 
 use crate::{arithmetic, builder::ConstraintSystemBuilder};
 
-const LOG_U32_BITS: usize = checked_log_2(32);
+pub const LOG_U32_BITS: usize = checked_log_2(32);
 
 type B1 = BinaryField1b;
 

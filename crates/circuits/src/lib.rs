@@ -9,6 +9,7 @@
 #![feature(array_try_map, array_try_from_fn)]
 #![allow(clippy::module_inception)]
 
+pub mod acc_blake3;
 pub mod arithmetic;
 pub mod bitwise;
 pub mod builder;

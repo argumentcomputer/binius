@@ -160,9 +160,9 @@ pub fn add3<U, F>(
 	zin: OracleId,
 	flags: super::Flags,
 ) -> Result<OracleId, anyhow::Error>
-	where
-		U: PackScalar<F> + PackScalar<BinaryField1b> + Pod,
-		F: TowerField,
+where
+	U: PackScalar<F> + PackScalar<BinaryField1b> + Pod,
+	F: TowerField,
 {
 	builder.push_namespace(name);
 	let log_rows = builder.log_rows([xin, yin, zin])?;
@@ -205,10 +205,9 @@ pub fn add3<U, F>(
 		"right",
 		[xin, yin, zin, right],
 		arith_expr!(
-			[x, y, z, right] =
-				x * (y + z) + y * z * (1 + x * (1 + (y + z + x * y * z))) - right
+			[x, y, z, right] = x * (y + z) + y * z * (1 + x * (1 + (y + z + x * y * z))) - right
 		)
-			.convert_field(),
+		.convert_field(),
 	);
 
 	builder.pop_namespace();
