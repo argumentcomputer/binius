@@ -104,6 +104,14 @@ path = "acc-repeated.rs"
 name = "acc-zeropadded"
 path = "acc-zeropadded.rs"
 
+[[example]]
+name = "acc-powers"
+path = "acc-powers.rs"
+
+[[example]]
+name = "acc-constants"
+path = "acc-constants.rs"
+
 [lints.clippy]
 needless_range_loop = "allow"
 
