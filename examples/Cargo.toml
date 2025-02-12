@@ -112,6 +112,10 @@ path = "acc-powers.rs"
 name = "acc-constants"
 path = "acc-constants.rs"
 
+[[example]]
+name = "acc-disjoint-product"
+path = "acc-disjoint-product.rs"
+
 [lints.clippy]
 needless_range_loop = "allow"
 
