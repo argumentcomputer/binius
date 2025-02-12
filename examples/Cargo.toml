@@ -116,6 +116,10 @@ path = "acc-constants.rs"
 name = "acc-disjoint-product"
 path = "acc-disjoint-product.rs"
 
+[[example]]
+name = "acc-eq-ind-partial-eval"
+path = "acc-eq-ind-partial-eval.rs"
+
 [lints.clippy]
 needless_range_loop = "allow"
 

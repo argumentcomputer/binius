@@ -1,10 +1,11 @@
 use binius_circuits::builder::ConstraintSystemBuilder;
-use binius_core::constraint_system::validate::validate_witness;
-use binius_core::transparent::constant::Constant;
-use binius_core::transparent::disjoint_product::DisjointProduct;
-use binius_core::transparent::powers::Powers;
-use binius_field::arch::OptimalUnderlier;
-use binius_field::{BinaryField, BinaryField128b, BinaryField8b, PackedField};
+use binius_core::{
+	constraint_system::validate::validate_witness,
+	transparent::{constant::Constant, disjoint_product::DisjointProduct, powers::Powers},
+};
+use binius_field::{
+	arch::OptimalUnderlier, BinaryField, BinaryField128b, BinaryField8b, PackedField,
+};
 
 type U = OptimalUnderlier;
 type F128 = BinaryField128b;
@@ -27,35 +28,37 @@ const LOG_SIZE: usize = 4;
 // Also note, that DisjointProduct makes eventual Transparent column to have height (n_vars) which is sum
 // of heights (n_vars) of Powers and Constant, so actual data could be repeated multiple times
 fn main() {
-    let allocator = bumpalo::Bump::new();
-    let mut builder = ConstraintSystemBuilder::<U, F128>::new_with_witness(&allocator);
+	let allocator = bumpalo::Bump::new();
+	let mut builder = ConstraintSystemBuilder::<U, F128>::new_with_witness(&allocator);
 
-    let generator = F8::MULTIPLICATIVE_GENERATOR;
-    let powers = Powers::new(LOG_SIZE, generator.into());
+	let generator = F8::MULTIPLICATIVE_GENERATOR;
+	let powers = Powers::new(LOG_SIZE, generator.into());
 
-    let constant_value = F8::new(0xf0);
-    let constant = Constant::new(LOG_SIZE, constant_value);
+	let constant_value = F8::new(0xf0);
+	let constant = Constant::new(LOG_SIZE, constant_value);
 
-    let disjoint_product = DisjointProduct(powers, constant);
-    let disjoint_product_id = builder.add_transparent("disjoint_product" , disjoint_product).unwrap();
+	let disjoint_product = DisjointProduct(powers, constant);
+	let disjoint_product_id = builder
+		.add_transparent("disjoint_product", disjoint_product)
+		.unwrap();
 
-    if let Some(witness) = builder.witness() {
-        let mut disjoint_product_witness = witness.new_column::<F8>(disjoint_product_id);
+	if let Some(witness) = builder.witness() {
+		let mut disjoint_product_witness = witness.new_column::<F8>(disjoint_product_id);
 
-        let values = disjoint_product_witness.as_mut_slice::<F8>();
+		let values = disjoint_product_witness.as_mut_slice::<F8>();
 
-        let mut exponent = 0u64;
-        for val in values.into_iter() {
-            if exponent == 2u64.pow(LOG_SIZE as u32) {
-                exponent = 0;
-            }
-            *val = generator.pow(exponent) * constant_value;
-            exponent += 1;
-        }
-    }
+		let mut exponent = 0u64;
+		for val in values.iter_mut() {
+			if exponent == 2u64.pow(LOG_SIZE as u32) {
+				exponent = 0;
+			}
+			*val = generator.pow(exponent) * constant_value;
+			exponent += 1;
+		}
+	}
 
-    let witness = builder.take_witness().unwrap();
-    let constraints_system = builder.build().unwrap();
+	let witness = builder.take_witness().unwrap();
+	let constraints_system = builder.build().unwrap();
 
-    validate_witness(&constraints_system, &[], &witness).unwrap();
+	validate_witness(&constraints_system, &[], &witness).unwrap();
 }
