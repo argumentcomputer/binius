@@ -17,6 +17,7 @@ pub mod keccakf;
 pub mod lasso;
 mod pack;
 pub mod plain_lookup;
+pub mod provide_require;
 pub mod sha256;
 pub mod transparent;
 pub mod u32fib;

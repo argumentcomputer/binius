@@ -1,5 +1,7 @@
 // Copyright 2024-2025 Irreducible Inc.
 
+use std::time::Instant;
+
 use binius_core::{
 	constraint_system::channel::{Boundary, FlushDirection},
 	oracle::OracleId,
@@ -77,11 +79,13 @@ where
 		let table_slice = witness.get::<FS>(table)?.as_slice::<FS>();
 		let values_slice = witness.get::<FS>(lookup_values)?.as_slice::<FS>();
 
+        let now = Instant::now();
 		multiplicities = Some(count_multiplicities(
 			&table_slice[0..table_count],
 			&values_slice[0..lookup_values_count],
 			false,
 		)?);
+        println!("Count mult {}", now.elapsed().as_millis());
 	}
 
 	let components: [OracleId; LOG_MAX_MULTIPLICITY] = get_components::<FS, LOG_MAX_MULTIPLICITY>(
@@ -366,7 +370,9 @@ mod count_multiplicity_tests {
 
 #[cfg(test)]
 mod tests {
-	use binius_core::{fiat_shamir::HasherChallenger, tower::CanonicalTowerFamily};
+	use std::time::Instant;
+
+use binius_core::{fiat_shamir::HasherChallenger, tower::CanonicalTowerFamily};
 	use binius_hal::make_portable_backend;
 	use binius_hash::compress::Groestl256ByteCompression;
 	use binius_math::DefaultEvaluationDomainFactory;
@@ -377,12 +383,13 @@ mod tests {
 
 	#[test]
 	fn test_plain_u8_mul_lookup() {
-		const MAX_LOG_MULTIPLICITY: usize = 18;
-		let log_lookup_count = 19;
+		const MAX_LOG_MULTIPLICITY: usize = 20;
+		let log_lookup_count = 22;
 
 		let log_inv_rate = 1;
 		let security_bits = 20;
 
+        let now = Instant::now();
 		let proof = {
 			let allocator = bumpalo::Bump::new();
 			let mut builder = ConstraintSystemBuilder::new_with_witness(&allocator);
@@ -419,6 +426,8 @@ mod tests {
 			)
 			.unwrap()
 		};
+        let elapsed = now.elapsed();
+        println!("Plain proof elapsed: {}, proof size: {}", elapsed.as_millis(), proof.get_proof_size());
 
 		// verify
 		{
