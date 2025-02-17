@@ -16,7 +16,7 @@ fn main() {
 	let mut builder = ConstraintSystemBuilder::<U, F128>::new_with_witness(&allocator);
 
 	let index = 58;
-	assert!(index <= 1 << LOG_SIZE - 1);
+	assert!(index < 1 << LOG_SIZE);
 
 	let select_row = SelectRow::new(LOG_SIZE, index).unwrap();
 	let transparent = builder.add_transparent("select_row", select_row).unwrap();

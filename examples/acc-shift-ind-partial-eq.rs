@@ -49,7 +49,7 @@ fn main() {
 
 		assert_eq!(lexicographical_order_x.len(), 1 << block_size);
 
-		for (val, x) in values.into_iter().zip(lexicographical_order_x.into_iter()) {
+		for (val, x) in values.iter_mut().zip(lexicographical_order_x.into_iter()) {
 			*val = compute(block_size, shift_offset, shift_variant, x, challenges.clone()).val();
 		}
 	}
@@ -85,10 +85,9 @@ fn compute(
 		s_ind_pp = temp_pp;
 	});
 
-	let out = match shift_variant {
+	match shift_variant {
 		ShiftVariant::CircularLeft => s_ind_p + s_ind_pp,
 		ShiftVariant::LogicalLeft => s_ind_p,
 		ShiftVariant::LogicalRight => s_ind_pp,
-	};
-	out
+	}
 }
