@@ -15,10 +15,13 @@ const LOG_SIZE: usize = 4;
 // FIXME: Following gadgets are unconstrained. Only for demonstrative purpose, don't use in production
 
 fn constants_gadget(
+	name: impl ToString,
 	log_size: usize,
 	builder: &mut ConstraintSystemBuilder<U, F128>,
 	constant_value: u32,
 ) -> OracleId {
+	builder.push_namespace(name);
+
 	let c = Constant::new(log_size, F32::new(constant_value));
 
 	let oracle = builder.add_transparent("constant", c).unwrap();
@@ -30,6 +33,8 @@ fn constants_gadget(
 			*v = constant_value;
 		}
 	}
+
+	builder.pop_namespace();
 
 	oracle
 }
@@ -60,7 +65,8 @@ fn main() {
 		}
 	}
 
-	let oracles: [OracleId; 8] = SHA256_INIT.map(|c| constants_gadget(LOG_SIZE, &mut builder, c));
+	let oracles: [OracleId; 8] =
+		SHA256_INIT.map(|c| constants_gadget("constants_gadget", LOG_SIZE, &mut builder, c));
 	if let Some(witness) = builder.witness() {
 		for (index, oracle) in oracles.into_iter().enumerate() {
 			// The difference is here. With Constant we have to operate over F32, while

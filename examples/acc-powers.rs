@@ -22,7 +22,9 @@ const LOG_SIZE: usize = 3;
 
 // where 'x' is a multiplicative generator - a public value that exists for every BinaryField
 //
-fn powers_gadget_f32(builder: &mut ConstraintSystemBuilder<U, F128>) {
+fn powers_gadget_f32(builder: &mut ConstraintSystemBuilder<U, F128>, name: impl ToString) {
+	builder.push_namespace(name);
+
 	let generator = F32::MULTIPLICATIVE_GENERATOR;
 	let powers = binius_core::transparent::powers::Powers::new(LOG_SIZE, generator.into());
 	let transparent = builder
@@ -36,10 +38,14 @@ fn powers_gadget_f32(builder: &mut ConstraintSystemBuilder<U, F128>) {
 			*val = generator.pow(exp as u64);
 		}
 	}
+
+	builder.pop_namespace();
 }
 
 // Only Field is being changed
-fn powers_gadget_f16(builder: &mut ConstraintSystemBuilder<U, F128>) {
+fn powers_gadget_f16(builder: &mut ConstraintSystemBuilder<U, F128>, name: impl ToString) {
+	builder.push_namespace(name);
+
 	let generator = F16::MULTIPLICATIVE_GENERATOR;
 	let powers = binius_core::transparent::powers::Powers::new(LOG_SIZE, generator.into());
 	let transparent = builder
@@ -53,14 +59,16 @@ fn powers_gadget_f16(builder: &mut ConstraintSystemBuilder<U, F128>) {
 			*val = generator.pow(exp as u64);
 		}
 	}
+
+	builder.pop_namespace();
 }
 
 fn main() {
 	let allocator = bumpalo::Bump::new();
 	let mut builder = ConstraintSystemBuilder::<U, F128>::new_with_witness(&allocator);
 
-	powers_gadget_f16(&mut builder);
-	powers_gadget_f32(&mut builder);
+	powers_gadget_f16(&mut builder, "f16");
+	powers_gadget_f32(&mut builder, "f32");
 
 	let witness = builder.take_witness().unwrap();
 	let constraints_system = builder.build().unwrap();
