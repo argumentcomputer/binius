@@ -15,6 +15,7 @@ binius_hash = { path = "../crates/hash" }
 binius_macros = { path = "../crates/macros" }
 binius_math = { path = "../crates/math" }
 binius_utils = { path = "../crates/utils", default-features = false }
+bytemuck.workspace = true
 bumpalo.workspace = true
 bytesize.workspace = true
 clap = { version = "4.5.20", features = ["derive"] }
@@ -119,6 +120,30 @@ path = "acc-disjoint-product.rs"
 [[example]]
 name = "acc-eq-ind-partial-eval"
 path = "acc-eq-ind-partial-eval.rs"
+
+[[example]]
+name = "acc-multilinear-extension-transparent"
+path = "acc-multilinear-extension-transparent.rs"
+
+[[example]]
+name = "acc-select-row"
+path = "acc-select-row.rs"
+
+[[example]]
+name = "acc-shift-ind-partial-eq"
+path = "acc-shift-ind-partial-eq.rs"
+
+[[example]]
+name = "acc-step-down"
+path = "acc-step-down.rs"
+
+[[example]]
+name = "acc-step-up"
+path = "acc-step-up.rs"
+
+[[example]]
+name = "acc-tower-basis"
+path = "acc-tower-basis.rs"
 
 [lints.clippy]
 needless_range_loop = "allow"
