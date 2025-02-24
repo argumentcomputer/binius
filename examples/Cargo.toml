@@ -26,10 +26,6 @@ tracing-profile.workspace = true
 tracing.workspace = true
 
 [[example]]
-name = "groestl_circuit"
-path = "groestl_circuit.rs"
-
-[[example]]
 name = "keccakf_circuit"
 path = "keccakf_circuit.rs"
 
@@ -81,9 +77,9 @@ path = "b32_mul.rs"
 name = "acc-linear-combination"
 path = "acc-linear-combination.rs"
 
-[[example]]
-name = "acc-linear-combination-with-offset"
-path = "acc-linear-combination-with-offset.rs"
+#[[example]]
+#name = "acc-linear-combination-with-offset"
+#path = "acc-linear-combination-with-offset.rs"
 
 [[example]]
 name = "acc-shifted"
@@ -145,6 +141,10 @@ path = "acc-step-up.rs"
 name = "acc-tower-basis"
 path = "acc-tower-basis.rs"
 
+[[example]]
+name = "acc-permutation-channels"
+path = "acc-permutation-channels.rs"
+
 [lints.clippy]
 needless_range_loop = "allow"
 
@@ -154,4 +154,3 @@ aes-tower = []
 bail_panic = ["binius_utils/bail_panic"]
 fp-tower = []
 rayon = ["binius_utils/rayon"]
-

@@ -7,7 +7,8 @@ use std::{
 	ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
 };
 
-use binius_field::{Field, PackedField};
+use binius_field::{Field, PackedField, TowerField};
+use binius_macros::{DeserializeBytes, SerializeBytes};
 
 use super::error::Error;
 
@@ -16,7 +17,7 @@ use super::error::Error;
 /// Arithmetic expressions are trees, where the leaves are either constants or variables, and the
 /// non-leaf nodes are arithmetic operations, such as addition, multiplication, etc. They are
 /// specific representations of multivariate polynomials.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, SerializeBytes, DeserializeBytes)]
 pub enum ArithExpr<F: Field> {
 	Const(F),
 	Var(usize),
@@ -136,7 +137,7 @@ impl<F: Field> ArithExpr<F> {
 		&self,
 	) -> Result<ArithExpr<FTgt>, <FTgt as TryFrom<F>>::Error> {
 		Ok(match self {
-			Self::Const(val) => ArithExpr::Const((*val).try_into()?),
+			Self::Const(val) => ArithExpr::Const(FTgt::try_from(*val)?),
 			Self::Var(index) => ArithExpr::Var(*index),
 			Self::Add(left, right) => {
 				let new_left = left.try_convert_field()?;
@@ -193,6 +194,19 @@ impl<F: Field> ArithExpr<F> {
 					id => Self::Pow(Box::new(id), *exp),
 				}
 			}
+		}
+	}
+}
+
+impl<F: TowerField> ArithExpr<F> {
+	pub fn binary_tower_level(&self) -> usize {
+		match self {
+			Self::Const(value) => value.min_tower_level(),
+			Self::Var(_) => 0,
+			Self::Add(left, right) | Self::Mul(left, right) => {
+				max(left.binary_tower_level(), right.binary_tower_level())
+			}
+			Self::Pow(base, _) => base.binary_tower_level(),
 		}
 	}
 }

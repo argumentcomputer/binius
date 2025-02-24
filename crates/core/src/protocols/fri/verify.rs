@@ -4,7 +4,7 @@ use std::iter;
 
 use binius_field::{BinaryField, ExtensionField, TowerField};
 use binius_hal::{make_portable_backend, ComputationBackend};
-use binius_utils::{bail, serialization::DeserializeBytes};
+use binius_utils::{bail, DeserializeBytes};
 use bytes::Buf;
 use itertools::izip;
 use tracing::instrument;

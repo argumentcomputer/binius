@@ -16,8 +16,8 @@ mod error;
 
 use std::{iter::repeat_with, slice};
 
-use binius_field::{deserialize_canonical, serialize_canonical, PackedField, TowerField};
-use binius_utils::serialization::{DeserializeBytes, SerializeBytes};
+use binius_field::{PackedField, TowerField};
+use binius_utils::{DeserializeBytes, SerializationMode, SerializeBytes};
 use bytes::{buf::UninitSlice, Buf, BufMut, Bytes, BytesMut};
 pub use error::Error;
 use tracing::warn;
@@ -259,12 +259,14 @@ impl<B: Buf> TranscriptReader<'_, B> {
 	}
 
 	pub fn read<T: DeserializeBytes>(&mut self) -> Result<T, Error> {
-		T::deserialize(self.buffer()).map_err(Into::into)
+		let mode = SerializationMode::CanonicalTower;
+		T::deserialize(self.buffer(), mode).map_err(Into::into)
 	}
 
 	pub fn read_vec<T: DeserializeBytes>(&mut self, n: usize) -> Result<Vec<T>, Error> {
+		let mode = SerializationMode::CanonicalTower;
 		let mut buffer = self.buffer();
-		repeat_with(move || T::deserialize(&mut buffer).map_err(Into::into))
+		repeat_with(move || T::deserialize(&mut buffer, mode).map_err(Into::into))
 			.take(n)
 			.collect()
 	}
@@ -287,7 +289,8 @@ impl<B: Buf> TranscriptReader<'_, B> {
 	pub fn read_scalar_slice_into<F: TowerField>(&mut self, buf: &mut [F]) -> Result<(), Error> {
 		let mut buffer = self.buffer();
 		for elem in buf {
-			*elem = deserialize_canonical(&mut buffer)?;
+			let mode = SerializationMode::CanonicalTower;
+			*elem = DeserializeBytes::deserialize(&mut buffer, mode)?;
 		}
 		Ok(())
 	}
@@ -334,20 +337,27 @@ impl<B: BufMut> TranscriptWriter<'_, B> {
 	}
 
 	pub fn write<T: SerializeBytes>(&mut self, value: &T) {
-		value
-			.serialize(self.buffer())
-			.expect("TODO: propagate error")
+		self.proof_size_event_wrapper(|buffer| {
+			value
+				.serialize(buffer, SerializationMode::CanonicalTower)
+				.expect("TODO: propagate error");
+		});
 	}
 
 	pub fn write_slice<T: SerializeBytes>(&mut self, values: &[T]) {
-		let mut buffer = self.buffer();
-		for value in values {
-			value.serialize(&mut buffer).expect("TODO: propagate error")
-		}
+		self.proof_size_event_wrapper(|buffer| {
+			for value in values {
+				value
+					.serialize(&mut *buffer, SerializationMode::CanonicalTower)
+					.expect("TODO: propagate error");
+			}
+		});
 	}
 
 	pub fn write_bytes(&mut self, data: &[u8]) {
-		self.buffer().put_slice(data);
+		self.proof_size_event_wrapper(|buffer| {
+			buffer.put_slice(data);
+		});
 	}
 
 	pub fn write_scalar<F: TowerField>(&mut self, f: F) {
@@ -355,10 +365,12 @@ impl<B: BufMut> TranscriptWriter<'_, B> {
 	}
 
 	pub fn write_scalar_slice<F: TowerField>(&mut self, elems: &[F]) {
-		let mut buffer = self.buffer();
-		for elem in elems {
-			serialize_canonical(*elem, &mut buffer).expect("TODO: propagate error");
-		}
+		self.proof_size_event_wrapper(|buffer| {
+			for elem in elems {
+				SerializeBytes::serialize(elem, &mut *buffer, SerializationMode::CanonicalTower)
+					.expect("TODO: propagate error");
+			}
+		});
 	}
 
 	pub fn write_packed<P: PackedField<Scalar: TowerField>>(&mut self, packed: P) {
@@ -378,6 +390,14 @@ impl<B: BufMut> TranscriptWriter<'_, B> {
 			self.write_bytes(msg.as_bytes())
 		}
 	}
+
+	fn proof_size_event_wrapper<F: Fn(&mut B)>(&mut self, f: F) {
+		let buffer = self.buffer();
+		let start_bytes = buffer.remaining_mut();
+		f(buffer);
+		let end_bytes = buffer.remaining_mut();
+		tracing::event!(name: "proof_size", tracing::Level::INFO, counter=true, incremental=true, value=start_bytes - end_bytes);
+	}
 }
 
 impl<F, Challenger_> CanSample<F> for VerifierTranscript<Challenger_>
@@ -386,7 +406,8 @@ where
 	Challenger_: Challenger,
 {
 	fn sample(&mut self) -> F {
-		deserialize_canonical(self.combined.challenger.sampler())
+		let mode = SerializationMode::CanonicalTower;
+		DeserializeBytes::deserialize(self.combined.challenger.sampler(), mode)
 			.expect("challenger has infinite buffer")
 	}
 }
@@ -397,7 +418,8 @@ where
 	Challenger_: Challenger,
 {
 	fn sample(&mut self) -> F {
-		deserialize_canonical(self.combined.challenger.sampler())
+		let mode = SerializationMode::CanonicalTower;
+		DeserializeBytes::deserialize(self.combined.challenger.sampler(), mode)
 			.expect("challenger has infinite buffer")
 	}
 }

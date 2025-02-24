@@ -9,7 +9,7 @@ use binius_field::{
 };
 use binius_hal::{ComputationBackend, ComputationBackendExt};
 use binius_math::{
-	CompositionPolyOS, Error as MathError, EvaluationDomainFactory,
+	CompositionPoly, Error as MathError, EvaluationDomainFactory,
 	IsomorphicEvaluationDomainFactory, MLEDirectAdapter, MultilinearPoly,
 };
 use binius_maybe_rayon::prelude::*;
@@ -95,7 +95,7 @@ pub fn univariatizing_reduction_prover<'a, F, FDomain, P, Backend>(
 	backend: &'a Backend,
 ) -> Result<Prover<'a, FDomain, P, Backend>, Error>
 where
-	F: TowerField + ExtensionField<FDomain>,
+	F: TowerField,
 	FDomain: TowerField,
 	P: PackedFieldIndexable<Scalar = F>
 		+ PackedExtension<F, PackedSubfield = P>
@@ -132,12 +132,7 @@ where
 }
 
 #[derive(Debug)]
-struct ParFoldStates<FBase, P>
-where
-	FBase: Field + PackedField,
-	P: PackedField + PackedExtension<FBase>,
-	P::Scalar: ExtensionField<FBase>,
-{
+struct ParFoldStates<FBase: Field, P: PackedExtension<FBase>> {
 	/// Evaluations of a multilinear subcube, embedded into P (see MultilinearPoly::subcube_evals). Scratch space.
 	evals: Vec<P>,
 	/// `evals` cast to base field and transposed to 2^skip_rounds * 2^log_batch row-major form. Scratch space.
@@ -150,12 +145,7 @@ where
 	round_evals: Vec<Vec<P::Scalar>>,
 }
 
-impl<FBase, P> ParFoldStates<FBase, P>
-where
-	FBase: Field,
-	P: PackedField + PackedExtension<FBase>,
-	P::Scalar: ExtensionField<FBase>,
-{
+impl<FBase: Field, P: PackedExtension<FBase>> ParFoldStates<FBase, P> {
 	fn new(
 		n_multilinears: usize,
 		skip_rounds: usize,
@@ -335,11 +325,11 @@ pub fn zerocheck_univariate_evals<F, FDomain, FBase, P, Composition, M, Backend>
 where
 	FDomain: TowerField,
 	FBase: ExtensionField<FDomain>,
-	F: TowerField + ExtensionField<FBase> + ExtensionField<FDomain>,
+	F: TowerField,
 	P: PackedFieldIndexable<Scalar = F>
 		+ PackedExtension<FBase, PackedSubfield: PackedFieldIndexable>
 		+ PackedExtension<FDomain, PackedSubfield: PackedFieldIndexable>,
-	Composition: CompositionPolyOS<PackedSubfield<P, FBase>>,
+	Composition: CompositionPoly<PackedSubfield<P, FBase>>,
 	M: MultilinearPoly<P> + Send + Sync,
 	Backend: ComputationBackend,
 {
@@ -388,7 +378,7 @@ where
 	// univariatized subcube.
 	// NB: expansion of the first `skip_rounds` variables is applied to the round evals sum
 	let partial_eq_ind_evals = backend.tensor_product_full_query(zerocheck_challenges)?;
-	let partial_eq_ind_evals_scalars = P::unpack_scalars(&partial_eq_ind_evals[..]);
+	let partial_eq_ind_evals_scalars = P::unpack_scalars(&partial_eq_ind_evals);
 
 	// Evaluate each composition on a minimal packed prefix corresponding to the degree
 	let pbase_prefix_lens = composition_degrees
@@ -754,7 +744,7 @@ mod tests {
 	};
 	use binius_hal::make_portable_backend;
 	use binius_math::{
-		CompositionPolyOS, DefaultEvaluationDomainFactory, EvaluationDomainFactory, MultilinearPoly,
+		CompositionPoly, DefaultEvaluationDomainFactory, EvaluationDomainFactory, MultilinearPoly,
 	};
 	use binius_ntt::SingleThreadedNTT;
 	use rand::{prelude::StdRng, SeedableRng};
@@ -823,7 +813,7 @@ mod tests {
 							.map(|i| interleaved_scalars[(i << log_batch) + batch_idx])
 							.collect::<Vec<_>>();
 
-						for (i, &point) in max_domain.points()[1 << skip_rounds..]
+						for (i, &point) in max_domain.finite_points()[1 << skip_rounds..]
 							[..extrapolated_scalars_cnt]
 							.iter()
 							.enumerate()
@@ -889,11 +879,11 @@ mod tests {
 
 		let compositions = [
 			Arc::new(IndexComposition::new(9, [0, 1], ProductComposition::<2> {}).unwrap())
-				as Arc<dyn CompositionPolyOS<PackedType<U, FBase>>>,
+				as Arc<dyn CompositionPoly<PackedType<U, FBase>>>,
 			Arc::new(IndexComposition::new(9, [2, 3, 4], ProductComposition::<3> {}).unwrap())
-				as Arc<dyn CompositionPolyOS<PackedType<U, FBase>>>,
+				as Arc<dyn CompositionPoly<PackedType<U, FBase>>>,
 			Arc::new(IndexComposition::new(9, [5, 6, 7, 8], ProductComposition::<4> {}).unwrap())
-				as Arc<dyn CompositionPolyOS<PackedType<U, FBase>>>,
+				as Arc<dyn CompositionPoly<PackedType<U, FBase>>>,
 		];
 
 		let backend = make_portable_backend();

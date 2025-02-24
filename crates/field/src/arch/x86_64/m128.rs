@@ -13,7 +13,7 @@ use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
 use crate::{
 	arch::{
-		binary_utils::{as_array_mut, make_func_to_i8},
+		binary_utils::{as_array_mut, as_array_ref, make_func_to_i8},
 		portable::{
 			packed::{impl_pack_scalar, PackedPrimitiveType},
 			packed_arithmetic::{
@@ -23,8 +23,9 @@ use crate::{
 	},
 	arithmetic_traits::Broadcast,
 	underlier::{
-		impl_divisible, impl_iteration, spread_fallback, NumCast, Random, SmallU, SpreadToByte,
-		UnderlierType, UnderlierWithBitOps, WithUnderlier, U1, U2, U4,
+		impl_divisible, impl_iteration, spread_fallback, unpack_hi_128b_fallback,
+		unpack_lo_128b_fallback, NumCast, Random, SmallU, SpreadToByte, UnderlierType,
+		UnderlierWithBitOps, WithUnderlier, U1, U2, U4,
 	},
 	BinaryField,
 };
@@ -181,7 +182,7 @@ impl Not for M128 {
 }
 
 /// `std::cmp::max` isn't const, so we need our own implementation
-const fn max_i32(left: i32, right: i32) -> i32 {
+pub(crate) const fn max_i32(left: i32, right: i32) -> i32 {
 	if left > right {
 		left
 	} else {
@@ -193,21 +194,36 @@ const fn max_i32(left: i32, right: i32) -> i32 {
 /// We have to use macro because parameter `count` in _mm_slli_epi64/_mm_srli_epi64 should be passed as constant
 /// and Rust currently doesn't allow passing expressions (`count - 64`) where variable is a generic constant parameter.
 /// Source: https://stackoverflow.com/questions/34478328/the-best-way-to-shift-a-m128i/34482688#34482688
-macro_rules! bitshift_right {
-	($val:expr, $count:literal) => {
+macro_rules! bitshift_128b {
+	($val:expr, $shift:ident, $byte_shift:ident, $bit_shift_64:ident, $bit_shift_64_opposite:ident, $or:ident) => {
 		unsafe {
-			let carry = _mm_bsrli_si128($val, 8);
-			if $count >= 64 {
-				_mm_srli_epi64(carry, max_i32($count - 64, 0))
-			} else {
-				let carry = _mm_slli_epi64(carry, max_i32(64 - $count, 0));
+			let carry = $byte_shift($val, 8);
+			seq!(N in 64..128 {
+				if $shift == N {
+					return $bit_shift_64(
+						carry,
+						crate::arch::x86_64::m128::max_i32((N - 64) as i32, 0) as _,
+					).into();
+				}
+			});
+			seq!(N in 0..64 {
+				if $shift == N {
+					let carry = $bit_shift_64_opposite(
+						carry,
+						crate::arch::x86_64::m128::max_i32((64 - N) as i32, 0) as _,
+					);
 
-				let val = _mm_srli_epi64($val, $count);
-				_mm_or_si128(val, carry)
-			}
+					let val = $bit_shift_64($val, N);
+					return $or(val, carry).into();
+				}
+			});
+
+			return Default::default()
 		}
 	};
 }
+
+pub(crate) use bitshift_128b;
 
 impl Shr<usize> for M128 {
 	type Output = Self;
@@ -216,30 +232,8 @@ impl Shr<usize> for M128 {
 	fn shr(self, rhs: usize) -> Self::Output {
 		// This implementation is effective when `rhs` is known at compile-time.
 		// In our code this is always the case.
-		seq!(N in 0..128 {
-			if rhs == N {
-				return Self(bitshift_right!(self.0, N));
-			}
-		});
-
-		Self::default()
+		bitshift_128b!(self.0, rhs, _mm_bsrli_si128, _mm_srli_epi64, _mm_slli_epi64, _mm_or_si128)
 	}
-}
-
-macro_rules! bitshift_left {
-	($val:expr, $count:literal) => {
-		unsafe {
-			let carry = _mm_bslli_si128($val, 8);
-			if $count >= 64 {
-				_mm_slli_epi64(carry, max_i32($count - 64, 0))
-			} else {
-				let carry = _mm_srli_epi64(carry, max_i32(64 - $count, 0));
-
-				let val = _mm_slli_epi64($val, $count);
-				_mm_or_si128(val, carry)
-			}
-		}
-	};
 }
 
 impl Shl<usize> for M128 {
@@ -249,13 +243,7 @@ impl Shl<usize> for M128 {
 	fn shl(self, rhs: usize) -> Self::Output {
 		// This implementation is effective when `rhs` is known at compile-time.
 		// In our code this is always the case.
-		seq!(N in 0..128 {
-			if rhs == N {
-				return Self(bitshift_left!(self.0, N));
-			}
-		});
-
-		Self::default()
+		bitshift_128b!(self.0, rhs, _mm_bslli_si128, _mm_slli_epi64, _mm_srli_epi64, _mm_or_si128);
 	}
 }
 
@@ -420,39 +408,41 @@ impl UnderlierWithBitOps for M128 {
 	#[inline(always)]
 	unsafe fn get_subvalue<T>(&self, i: usize) -> T
 	where
-		T: WithUnderlier,
-		T::Underlier: NumCast<Self>,
+		T: UnderlierType + NumCast<Self>,
 	{
-		match T::Underlier::BITS {
-			1 | 2 | 4 | 8 | 16 | 32 | 64 => {
-				let elements_in_64 = 64 / T::Underlier::BITS;
-				let chunk_64 = unsafe {
-					if i >= elements_in_64 {
-						_mm_extract_epi64(self.0, 1)
-					} else {
-						_mm_extract_epi64(self.0, 0)
-					}
-				};
+		match T::BITS {
+			1 | 2 | 4 => {
+				let elements_in_8 = 8 / T::BITS;
+				let mut value_u8 = as_array_ref::<_, u8, 16, _>(self, |arr| unsafe {
+					*arr.get_unchecked(i / elements_in_8)
+				});
 
-				let result_64 = if T::Underlier::BITS == 64 {
-					chunk_64
-				} else {
-					let ones = ((1u128 << T::Underlier::BITS) - 1) as u64;
-					let val_64 = (chunk_64 as u64)
-						>> (T::Underlier::BITS
-							* (if i >= elements_in_64 {
-								i - elements_in_64
-							} else {
-								i
-							})) & ones;
+				let shift = (i % elements_in_8) * T::BITS;
+				value_u8 >>= shift;
 
-					val_64 as i64
-				};
-				T::from_underlier(T::Underlier::num_cast_from(Self(unsafe {
-					_mm_set_epi64x(0, result_64)
-				})))
+				T::from_underlier(T::num_cast_from(Self::from(value_u8)))
 			}
-			128 => T::from_underlier(T::Underlier::num_cast_from(*self)),
+			8 => {
+				let value_u8 =
+					as_array_ref::<_, u8, 16, _>(self, |arr| unsafe { *arr.get_unchecked(i) });
+				T::from_underlier(T::num_cast_from(Self::from(value_u8)))
+			}
+			16 => {
+				let value_u16 =
+					as_array_ref::<_, u16, 8, _>(self, |arr| unsafe { *arr.get_unchecked(i) });
+				T::from_underlier(T::num_cast_from(Self::from(value_u16)))
+			}
+			32 => {
+				let value_u32 =
+					as_array_ref::<_, u32, 4, _>(self, |arr| unsafe { *arr.get_unchecked(i) });
+				T::from_underlier(T::num_cast_from(Self::from(value_u32)))
+			}
+			64 => {
+				let value_u64 =
+					as_array_ref::<_, u64, 2, _>(self, |arr| unsafe { *arr.get_unchecked(i) });
+				T::from_underlier(T::num_cast_from(Self::from(value_u64)))
+			}
+			128 => T::from_underlier(T::num_cast_from(*self)),
 			_ => panic!("unsupported bit count"),
 		}
 	}
@@ -471,23 +461,23 @@ impl UnderlierWithBitOps for M128 {
 				let val = u8::num_cast_from(Self::from(val)) << shift;
 				let mask = mask << shift;
 
-				as_array_mut::<_, u8, 16>(self, |array| {
-					let element = &mut array[i / elements_in_8];
+				as_array_mut::<_, u8, 16>(self, |array| unsafe {
+					let element = array.get_unchecked_mut(i / elements_in_8);
 					*element &= !mask;
 					*element |= val;
 				});
 			}
-			8 => as_array_mut::<_, u8, 16>(self, |array| {
-				array[i] = u8::num_cast_from(Self::from(val));
+			8 => as_array_mut::<_, u8, 16>(self, |array| unsafe {
+				*array.get_unchecked_mut(i) = u8::num_cast_from(Self::from(val));
 			}),
-			16 => as_array_mut::<_, u16, 8>(self, |array| {
-				array[i] = u16::num_cast_from(Self::from(val));
+			16 => as_array_mut::<_, u16, 8>(self, |array| unsafe {
+				*array.get_unchecked_mut(i) = u16::num_cast_from(Self::from(val));
 			}),
-			32 => as_array_mut::<_, u32, 4>(self, |array| {
-				array[i] = u32::num_cast_from(Self::from(val));
+			32 => as_array_mut::<_, u32, 4>(self, |array| unsafe {
+				*array.get_unchecked_mut(i) = u32::num_cast_from(Self::from(val));
 			}),
-			64 => as_array_mut::<_, u64, 2>(self, |array| {
-				array[i] = u64::num_cast_from(Self::from(val));
+			64 => as_array_mut::<_, u64, 2>(self, |array| unsafe {
+				*array.get_unchecked_mut(i) = u64::num_cast_from(Self::from(val));
 			}),
 			128 => {
 				*self = Self::from(val);
@@ -703,6 +693,40 @@ impl UnderlierWithBitOps for M128 {
 			},
 			7 => self,
 			_ => panic!("unsupported bit length"),
+		}
+	}
+
+	#[inline]
+	fn shl_128b_lanes(self, shift: usize) -> Self {
+		self << shift
+	}
+
+	#[inline]
+	fn shr_128b_lanes(self, shift: usize) -> Self {
+		self >> shift
+	}
+
+	#[inline]
+	fn unpack_lo_128b_lanes(self, other: Self, log_block_len: usize) -> Self {
+		match log_block_len {
+			0..3 => unpack_lo_128b_fallback(self, other, log_block_len),
+			3 => unsafe { _mm_unpacklo_epi8(self.0, other.0).into() },
+			4 => unsafe { _mm_unpacklo_epi16(self.0, other.0).into() },
+			5 => unsafe { _mm_unpacklo_epi32(self.0, other.0).into() },
+			6 => unsafe { _mm_unpacklo_epi64(self.0, other.0).into() },
+			_ => panic!("unsupported block length"),
+		}
+	}
+
+	#[inline]
+	fn unpack_hi_128b_lanes(self, other: Self, log_block_len: usize) -> Self {
+		match log_block_len {
+			0..3 => unpack_hi_128b_fallback(self, other, log_block_len),
+			3 => unsafe { _mm_unpackhi_epi8(self.0, other.0).into() },
+			4 => unsafe { _mm_unpackhi_epi16(self.0, other.0).into() },
+			5 => unsafe { _mm_unpackhi_epi32(self.0, other.0).into() },
+			6 => unsafe { _mm_unpackhi_epi64(self.0, other.0).into() },
+			_ => panic!("unsupported block length"),
 		}
 	}
 }
@@ -922,6 +946,10 @@ mod tests {
 		assert_eq!(M128::from(1u128), M128::ONE);
 	}
 
+	fn get(value: M128, log_block_len: usize, index: usize) -> M128 {
+		(value >> (index << log_block_len)) & single_element_mask_bits::<M128>(1 << log_block_len)
+	}
+
 	proptest! {
 		#[test]
 		fn test_conversion(a in any::<u128>()) {
@@ -955,15 +983,36 @@ mod tests {
 			let (c, d) = unsafe {interleave_bits(a.0, b.0, height)};
 			let (c, d) = (M128::from(c), M128::from(d));
 
-			let block_len = 1usize << height;
-			let get = |v, i| {
-				u128::num_cast_from((v >> (i * block_len)) & single_element_mask_bits::<M128>(1 << height))
-			};
-			for i in (0..128/block_len).step_by(2) {
-				assert_eq!(get(c, i), get(a, i));
-				assert_eq!(get(c, i+1), get(b, i));
-				assert_eq!(get(d, i), get(a, i+1));
-				assert_eq!(get(d, i+1), get(b, i+1));
+			for i in (0..128>>height).step_by(2) {
+				assert_eq!(get(c, height, i), get(a, height, i));
+				assert_eq!(get(c, height, i+1), get(b, height, i));
+				assert_eq!(get(d, height, i), get(a, height, i+1));
+				assert_eq!(get(d, height, i+1), get(b, height, i+1));
+			}
+		}
+
+		#[test]
+		fn test_unpack_lo(a in any::<u128>(), b in any::<u128>(), height in 1usize..7) {
+			let a = M128::from(a);
+			let b = M128::from(b);
+
+			let result = a.unpack_lo_128b_lanes(b, height);
+			for i in 0..128>>(height + 1) {
+				assert_eq!(get(result, height, 2*i), get(a, height, i));
+				assert_eq!(get(result, height, 2*i+1), get(b, height, i));
+			}
+		}
+
+		#[test]
+		fn test_unpack_hi(a in any::<u128>(), b in any::<u128>(), height in 1usize..7) {
+			let a = M128::from(a);
+			let b = M128::from(b);
+
+			let result = a.unpack_hi_128b_lanes(b, height);
+			let half_block_count = 128>>(height + 1);
+			for i in 0..half_block_count {
+				assert_eq!(get(result, height, 2*i), get(a, height, i + half_block_count));
+				assert_eq!(get(result, height, 2*i+1), get(b, height, i + half_block_count));
 			}
 		}
 	}

@@ -153,7 +153,6 @@ impl<P, F> Hasher<P> for Groestl256<P, F>
 where
 	F: BinaryField + From<AESTowerField8b> + Into<AESTowerField8b>,
 	P: PackedExtension<F, PackedSubfield: PackedFieldIndexable>,
-	P::Scalar: ExtensionField<F>,
 	OptimalUnderlier256b: PackScalar<F> + Divisible<F::Underlier>,
 	Self: UpdateOverSlice<Elem = F>,
 {
@@ -300,7 +299,7 @@ mod tests {
 	}
 
 	#[test]
-	fn test_aes_binary_convertion() {
+	fn test_aes_binary_conversion() {
 		let mut rng = thread_rng();
 		let input_aes: [PackedAESBinaryField32x8b; 90] =
 			array::from_fn(|_| PackedAESBinaryField32x8b::random(&mut rng));

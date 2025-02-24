@@ -6,21 +6,17 @@ use binius_maybe_rayon::prelude::{
 
 use crate::{Error, ExtensionField, Field, PackedExtension, PackedField};
 
-pub fn ext_base_mul<PE, F>(lhs: &mut [PE], rhs: &[PE::PackedSubfield]) -> Result<(), Error>
-where
-	PE: PackedExtension<F>,
-	PE::Scalar: ExtensionField<F>,
-	F: Field,
-{
+pub fn ext_base_mul<PE: PackedExtension<F>, F: Field>(
+	lhs: &mut [PE],
+	rhs: &[PE::PackedSubfield],
+) -> Result<(), Error> {
 	ext_base_op(lhs, rhs, |_, lhs, broadcasted_rhs| PE::cast_ext(lhs.cast_base() * broadcasted_rhs))
 }
 
-pub fn ext_base_mul_par<PE, F>(lhs: &mut [PE], rhs: &[PE::PackedSubfield]) -> Result<(), Error>
-where
-	PE: PackedExtension<F>,
-	PE::Scalar: ExtensionField<F>,
-	F: Field,
-{
+pub fn ext_base_mul_par<PE: PackedExtension<F>, F: Field>(
+	lhs: &mut [PE],
+	rhs: &[PE::PackedSubfield],
+) -> Result<(), Error> {
 	ext_base_op_par(lhs, rhs, |_, lhs, broadcasted_rhs| {
 		PE::cast_ext(lhs.cast_base() * broadcasted_rhs)
 	})
@@ -29,15 +25,10 @@ where
 /// # Safety
 ///
 /// Width of PackedSubfield is >= the width of the field implementing PackedExtension.
-pub unsafe fn get_packed_subfields_at_pe_idx<PE, F>(
+pub unsafe fn get_packed_subfields_at_pe_idx<PE: PackedExtension<F>, F: Field>(
 	packed_subfields: &[PE::PackedSubfield],
 	i: usize,
-) -> PE::PackedSubfield
-where
-	PE: PackedExtension<F>,
-	PE::Scalar: ExtensionField<F>,
-	F: Field,
-{
+) -> PE::PackedSubfield {
 	let bottom_most_scalar_idx = i * PE::WIDTH;
 	let bottom_most_scalar_idx_in_subfield_arr = bottom_most_scalar_idx / PE::PackedSubfield::WIDTH;
 	let bottom_most_scalar_idx_within_packed_subfield =
@@ -67,7 +58,6 @@ pub fn ext_base_op<PE, F, Func>(
 ) -> Result<(), Error>
 where
 	PE: PackedExtension<F>,
-	PE::Scalar: ExtensionField<F>,
 	F: Field,
 	Func: Fn(usize, PE, PE::PackedSubfield) -> PE,
 {
@@ -93,7 +83,6 @@ pub fn ext_base_op_par<PE, F, Func>(
 ) -> Result<(), Error>
 where
 	PE: PackedExtension<F>,
-	PE::Scalar: ExtensionField<F>,
 	F: Field,
 	Func: Fn(usize, PE, PE::PackedSubfield) -> PE + std::marker::Sync,
 {
@@ -117,10 +106,10 @@ mod tests {
 
 	use crate::{
 		ext_base_mul, ext_base_mul_par,
-		packed::{get_packed_slice, set_packed_slice},
+		packed::{get_packed_slice, pack_slice},
 		underlier::WithUnderlier,
 		BinaryField128b, BinaryField16b, BinaryField8b, PackedBinaryField16x16b,
-		PackedBinaryField2x128b, PackedBinaryField32x8b, PackedField,
+		PackedBinaryField2x128b, PackedBinaryField32x8b,
 	};
 
 	fn strategy_8b_scalars() -> impl Strategy<Value = [BinaryField8b; 32]> {
@@ -136,16 +125,6 @@ mod tests {
 	fn strategy_128b_scalars() -> impl Strategy<Value = [BinaryField128b; 32]> {
 		any::<[<BinaryField128b as WithUnderlier>::Underlier; 32]>()
 			.prop_map(|arr| arr.map(<BinaryField128b>::from_underlier))
-	}
-
-	fn pack_slice<P: PackedField>(scalar_slice: &[P::Scalar]) -> Vec<P> {
-		let mut packed_slice = vec![P::default(); scalar_slice.len() / P::WIDTH];
-
-		for (i, scalar) in scalar_slice.iter().enumerate() {
-			set_packed_slice(&mut packed_slice, i, *scalar);
-		}
-
-		packed_slice
 	}
 
 	proptest! {

@@ -2,15 +2,16 @@
 
 use std::{
 	any::TypeId,
-	array,
 	fmt::{Debug, Display, Formatter},
 	iter::{Product, Sum},
 	ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 
-use binius_utils::serialization::{DeserializeBytes, Error as SerializationError, SerializeBytes};
+use binius_utils::{
+	bytes::{Buf, BufMut},
+	DeserializeBytes, SerializationError, SerializationMode, SerializeBytes,
+};
 use bytemuck::{Pod, Zeroable};
-use bytes::{Buf, BufMut};
 use rand::RngCore;
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
@@ -18,7 +19,7 @@ use super::{
 	binary_field_arithmetic::TowerFieldArithmetic, error::Error, extension::ExtensionField,
 };
 use crate::{
-	underlier::{SmallU, U1, U2, U4},
+	underlier::{U1, U2, U4},
 	Field,
 };
 
@@ -45,6 +46,13 @@ where
 	/// The canonical field isomorphic to this tower field.
 	/// Currently for every tower field, the canonical field is Fan-Paar's binary field of the same degree.
 	type Canonical: TowerField + SerializeBytes + DeserializeBytes;
+
+	/// Returns the smallest valid `TOWER_LEVEL` in the tower that can fit the same value.
+	///
+	/// Since which `TOWER_LEVEL` values are valid depends on the tower,
+	/// `F::Canonical::from(elem).min_tower_level()` can return a different result
+	/// from `elem.min_tower_level()`.
+	fn min_tower_level(self) -> usize;
 
 	fn basis(iota: usize, i: usize) -> Result<Self, Error> {
 		if iota > Self::TOWER_LEVEL {
@@ -564,7 +572,6 @@ macro_rules! impl_field_extension {
 		}
 
 		impl ExtensionField<$subfield_name> for $name {
-			type Iterator = <[$subfield_name; 1 << $log_degree] as IntoIterator>::IntoIter;
 			const LOG_DEGREE: usize = $log_degree;
 
 			#[inline]
@@ -597,15 +604,21 @@ macro_rules! impl_field_extension {
 			}
 
 			#[inline]
-			fn iter_bases(&self) -> Self::Iterator {
-				use $crate::underlier::NumCast;
+			fn iter_bases(&self) -> impl Iterator<Item = $subfield_name> {
+				use $crate::underlier::{WithUnderlier, IterationMethods, IterationStrategy};
+				use binius_utils::iter::IterExtensions;
 
-				let base_elems = array::from_fn(|i| {
-					<$subfield_name>::new(<$subfield_typ>::num_cast_from(
-						(self.0 >> (i * $subfield_name::N_BITS)),
-					))
-				});
-				base_elems.into_iter()
+				IterationMethods::<<$subfield_name as WithUnderlier>::Underlier, Self::Underlier>::ref_iter(&self.0)
+					.map_skippable($subfield_name::from)
+			}
+
+			#[inline]
+			fn into_iter_bases(self) -> impl Iterator<Item = $subfield_name> {
+				use $crate::underlier::{WithUnderlier, IterationMethods, IterationStrategy};
+				use binius_utils::iter::IterExtensions;
+
+				IterationMethods::<<$subfield_name as WithUnderlier>::Underlier, Self::Underlier>::value_iter(self.0)
+					.map_skippable($subfield_name::from)
 			}
 		}
 	};
@@ -621,10 +634,16 @@ pub(super) trait MulPrimitive: Sized {
 
 #[macro_export]
 macro_rules! binary_tower {
-	($subfield_name:ident($subfield_typ:ty $(, $canonical_subfield:ident)?) < $name:ident($typ:ty)) => {
-		binary_tower!($subfield_name($subfield_typ $(, $canonical_subfield)?) < $name($typ, $name));
+	(BinaryField1b($subfield_typ:ty $(, $canonical_subfield:ident)?) < $name:ident($typ:ty $(, $canonical:ident)?) $(< $extfield_name:ident($extfield_typ:ty $(, $canonical_ext:ident)?))+) => {
+		binary_tower!([BinaryField1b::TOWER_LEVEL]; BinaryField1b($subfield_typ $(, $canonical_subfield)?) < $name($typ $(, $canonical)?) $(< $extfield_name($extfield_typ $(, $canonical_ext)?))+);
 	};
-	($subfield_name:ident($subfield_typ:ty $(, $canonical_subfield:ident)?) < $name:ident($typ:ty, $canonical:ident)) => {
+	($subfield_name:ident($subfield_typ:ty $(, $canonical_subfield:ident)?) < $name:ident($typ:ty $(, $canonical:ident)?) $(< $extfield_name:ident($extfield_typ:ty $(, $canonical_ext:ident)?))+) => {
+		binary_tower!([BinaryField1b::TOWER_LEVEL, $subfield_name::TOWER_LEVEL]; $subfield_name($subfield_typ $(, $canonical_subfield)?) < $name($typ $(, $canonical)?) $(< $extfield_name($extfield_typ $(, $canonical_ext)?))+);
+	};
+	([$($valid_tower_levels:tt)*]; $subfield_name:ident($subfield_typ:ty $(, $canonical_subfield:ident)?) < $name:ident($typ:ty)) => {
+		binary_tower!([$($valid_tower_levels)*]; $subfield_name($subfield_typ $(, $canonical_subfield)?) < $name($typ, $name));
+	};
+	([$($valid_tower_levels:tt)*]; $subfield_name:ident($subfield_typ:ty $(, $canonical_subfield:ident)?) < $name:ident($typ:ty, $canonical:ident)) => {
 		impl From<$name> for ($subfield_name, $subfield_name) {
 			#[inline]
 			fn from(src: $name) -> ($subfield_name, $subfield_name) {
@@ -648,6 +667,16 @@ macro_rules! binary_tower {
 
 			type Canonical = $canonical;
 
+			fn min_tower_level(self) -> usize {
+				let zero = <$typ as $crate::underlier::UnderlierWithBitOps>::ZERO;
+				for level in [$($valid_tower_levels)*] {
+					if self.0 >> (1 << level) == zero {
+						return level;
+					}
+				}
+				Self::TOWER_LEVEL
+			}
+
 			fn mul_primitive(self, iota: usize) -> Result<Self, Error> {
 				<Self as $crate::binary_field::MulPrimitive>::mul_primitive(self, iota)
 			}
@@ -659,14 +688,13 @@ macro_rules! binary_tower {
 
 		binary_tower!($subfield_name($subfield_typ) < @1 => $name($typ));
 	};
-	($subfield_name:ident($subfield_typ:ty $(, $canonical_subfield:ident)?) < $name:ident($typ:ty $(, $canonical:ident)?) $(< $extfield_name:ident($extfield_typ:ty $(, $canonical_ext:ident)?))+) => {
-		binary_tower!($subfield_name($subfield_typ $(, $canonical_subfield)?) < $name($typ $(, $canonical)?));
-		binary_tower!($name($typ $(, $canonical)?) $(< $extfield_name($extfield_typ $(, $canonical_ext)?))+);
+	([$($valid_tower_levels:tt)*]; $subfield_name:ident($subfield_typ:ty $(, $canonical_subfield:ident)?) < $name:ident($typ:ty $(, $canonical:ident)?) $(< $extfield_name:ident($extfield_typ:ty $(, $canonical_ext:ident)?))+) => {
+		binary_tower!([$($valid_tower_levels)*]; $subfield_name($subfield_typ $(, $canonical_subfield)?) < $name($typ $(, $canonical)?));
+		binary_tower!([$($valid_tower_levels)*, $name::TOWER_LEVEL]; $name($typ $(, $canonical)?) $(< $extfield_name($extfield_typ $(, $canonical_ext)?))+);
 		binary_tower!($subfield_name($subfield_typ) < @2 => $($extfield_name($extfield_typ))<+);
 	};
 	($subfield_name:ident($subfield_typ:ty) < @$log_degree:expr => $name:ident($typ:ty)) => {
 		$crate::binary_field::impl_field_extension!($subfield_name($subfield_typ) < @$log_degree => $name($typ));
-
 		$crate::binary_field::binary_tower_subfield_mul!($subfield_name, $name);
 	};
 	($subfield_name:ident($subfield_typ:ty) < @$log_degree:expr => $name:ident($typ:ty) $(< $extfield_name:ident($extfield_typ:ty))+) => {
@@ -707,76 +735,36 @@ pub fn is_canonical_tower<F: TowerField>() -> bool {
 }
 
 macro_rules! serialize_deserialize {
-	($bin_type:ty, SmallU<$U:literal>) => {
+	($bin_type:ty) => {
 		impl SerializeBytes for $bin_type {
-			fn serialize(&self, mut write_buf: impl BufMut) -> Result<(), SerializationError> {
-				if write_buf.remaining_mut() < 1 {
-					::binius_utils::bail!(SerializationError::WriteBufferFull);
-				}
-				let b = self.0.val();
-				write_buf.put_u8(b);
-				Ok(())
+			fn serialize(
+				&self,
+				write_buf: impl BufMut,
+				mode: SerializationMode,
+			) -> Result<(), SerializationError> {
+				self.0.serialize(write_buf, mode)
 			}
 		}
 
 		impl DeserializeBytes for $bin_type {
-			fn deserialize(mut read_buf: impl Buf) -> Result<Self, SerializationError> {
-				if read_buf.remaining() < 1 {
-					::binius_utils::bail!(SerializationError::NotEnoughBytes);
-				}
-				let b: u8 = read_buf.get_u8();
-				Ok(Self(SmallU::<$U>::new(b)))
-			}
-		}
-	};
-	($bin_type:ty, $inner_type:ty) => {
-		impl SerializeBytes for $bin_type {
-			fn serialize(&self, mut write_buf: impl BufMut) -> Result<(), SerializationError> {
-				if write_buf.remaining_mut() < (<$inner_type>::BITS / 8) as usize {
-					::binius_utils::bail!(SerializationError::WriteBufferFull);
-				}
-				write_buf.put_slice(&self.0.to_le_bytes());
-				Ok(())
-			}
-		}
-
-		impl DeserializeBytes for $bin_type {
-			fn deserialize(mut read_buf: impl Buf) -> Result<Self, SerializationError> {
-				let mut inner = <$inner_type>::default().to_le_bytes();
-				if read_buf.remaining() < inner.len() {
-					::binius_utils::bail!(SerializationError::NotEnoughBytes);
-				}
-				read_buf.copy_to_slice(&mut inner);
-				Ok(Self(<$inner_type>::from_le_bytes(inner)))
+			fn deserialize(
+				read_buf: impl Buf,
+				mode: SerializationMode,
+			) -> Result<Self, SerializationError> {
+				Ok(Self(DeserializeBytes::deserialize(read_buf, mode)?))
 			}
 		}
 	};
 }
 
-serialize_deserialize!(BinaryField1b, SmallU<1>);
-serialize_deserialize!(BinaryField2b, SmallU<2>);
-serialize_deserialize!(BinaryField4b, SmallU<4>);
-serialize_deserialize!(BinaryField8b, u8);
-serialize_deserialize!(BinaryField16b, u16);
-serialize_deserialize!(BinaryField32b, u32);
-serialize_deserialize!(BinaryField64b, u64);
-serialize_deserialize!(BinaryField128b, u128);
-
-/// Serializes a [`TowerField`] element to a byte buffer with a canonical encoding.
-pub fn serialize_canonical<F: TowerField, W: BufMut>(
-	elem: F,
-	mut writer: W,
-) -> Result<(), SerializationError> {
-	F::Canonical::from(elem).serialize(&mut writer)
-}
-
-/// Deserializes a [`TowerField`] element from a byte buffer with a canonical encoding.
-pub fn deserialize_canonical<F: TowerField, R: Buf>(
-	mut reader: R,
-) -> Result<F, SerializationError> {
-	let as_canonical = F::Canonical::deserialize(&mut reader)?;
-	Ok(F::from(as_canonical))
-}
+serialize_deserialize!(BinaryField1b);
+serialize_deserialize!(BinaryField2b);
+serialize_deserialize!(BinaryField4b);
+serialize_deserialize!(BinaryField8b);
+serialize_deserialize!(BinaryField16b);
+serialize_deserialize!(BinaryField32b);
+serialize_deserialize!(BinaryField64b);
+serialize_deserialize!(BinaryField128b);
 
 impl From<BinaryField1b> for Choice {
 	fn from(val: BinaryField1b) -> Self {
@@ -867,7 +855,7 @@ impl From<BinaryField4b> for u8 {
 
 #[cfg(test)]
 pub(crate) mod tests {
-	use bytes::BytesMut;
+	use binius_utils::{bytes::BytesMut, SerializationMode};
 	use proptest::prelude::*;
 
 	use super::{
@@ -1236,6 +1224,7 @@ pub(crate) mod tests {
 
 	#[test]
 	fn test_serialization() {
+		let mode = SerializationMode::CanonicalTower;
 		let mut buffer = BytesMut::new();
 		let b1 = BinaryField1b::from(0x1);
 		let b8 = BinaryField8b::new(0x12);
@@ -1246,25 +1235,25 @@ pub(crate) mod tests {
 		let b64 = BinaryField64b::new(0x13579BDF02468ACE);
 		let b128 = BinaryField128b::new(0x147AD0369CF258BE8899AABBCCDDEEFF);
 
-		b1.serialize(&mut buffer).unwrap();
-		b8.serialize(&mut buffer).unwrap();
-		b2.serialize(&mut buffer).unwrap();
-		b16.serialize(&mut buffer).unwrap();
-		b32.serialize(&mut buffer).unwrap();
-		b4.serialize(&mut buffer).unwrap();
-		b64.serialize(&mut buffer).unwrap();
-		b128.serialize(&mut buffer).unwrap();
+		b1.serialize(&mut buffer, mode).unwrap();
+		b8.serialize(&mut buffer, mode).unwrap();
+		b2.serialize(&mut buffer, mode).unwrap();
+		b16.serialize(&mut buffer, mode).unwrap();
+		b32.serialize(&mut buffer, mode).unwrap();
+		b4.serialize(&mut buffer, mode).unwrap();
+		b64.serialize(&mut buffer, mode).unwrap();
+		b128.serialize(&mut buffer, mode).unwrap();
 
 		let mut read_buffer = buffer.freeze();
 
-		assert_eq!(BinaryField1b::deserialize(&mut read_buffer).unwrap(), b1);
-		assert_eq!(BinaryField8b::deserialize(&mut read_buffer).unwrap(), b8);
-		assert_eq!(BinaryField2b::deserialize(&mut read_buffer).unwrap(), b2);
-		assert_eq!(BinaryField16b::deserialize(&mut read_buffer).unwrap(), b16);
-		assert_eq!(BinaryField32b::deserialize(&mut read_buffer).unwrap(), b32);
-		assert_eq!(BinaryField4b::deserialize(&mut read_buffer).unwrap(), b4);
-		assert_eq!(BinaryField64b::deserialize(&mut read_buffer).unwrap(), b64);
-		assert_eq!(BinaryField128b::deserialize(&mut read_buffer).unwrap(), b128);
+		assert_eq!(BinaryField1b::deserialize(&mut read_buffer, mode).unwrap(), b1);
+		assert_eq!(BinaryField8b::deserialize(&mut read_buffer, mode).unwrap(), b8);
+		assert_eq!(BinaryField2b::deserialize(&mut read_buffer, mode).unwrap(), b2);
+		assert_eq!(BinaryField16b::deserialize(&mut read_buffer, mode).unwrap(), b16);
+		assert_eq!(BinaryField32b::deserialize(&mut read_buffer, mode).unwrap(), b32);
+		assert_eq!(BinaryField4b::deserialize(&mut read_buffer, mode).unwrap(), b4);
+		assert_eq!(BinaryField64b::deserialize(&mut read_buffer, mode).unwrap(), b64);
+		assert_eq!(BinaryField128b::deserialize(&mut read_buffer, mode).unwrap(), b128);
 	}
 
 	#[test]

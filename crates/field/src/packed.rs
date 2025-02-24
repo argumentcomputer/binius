@@ -20,8 +20,7 @@ use super::{
 	Error,
 };
 use crate::{
-	arithmetic_traits::InvertOrZero, underlier::WithUnderlier, BinaryField, ExtensionField, Field,
-	PackedExtension,
+	arithmetic_traits::InvertOrZero, underlier::WithUnderlier, BinaryField, Field, PackedExtension,
 };
 
 /// A packed field represents a vector of underlying field elements.
@@ -216,6 +215,20 @@ pub trait PackedField:
 	/// * `log_block_len` must be strictly less than `LOG_WIDTH`.
 	fn interleave(self, other: Self, log_block_len: usize) -> (Self, Self);
 
+	/// Unzips interleaved blocks of this packed vector with another packed vector.
+	/// 
+	/// Consider this example, where `LOG_WIDTH` is 3 and `log_block_len` is 1:
+	///    A = [a0, a1, b0, b1, a2, a3, b2, b3]
+	///    B = [a4, a5, b4, b5, a6, a7, b6, b7]
+	/// 
+	/// The transposed result is
+	///    A' = [a0, a1, a2, a3, a4, a5, a6, a7]
+	///    B' = [b0, b1, b2, b3, b4, b5, b6, b7]
+	///
+	/// ## Preconditions
+	/// * `log_block_len` must be strictly less than `LOG_WIDTH`.
+	fn unzip(self, other: Self, log_block_len: usize) -> (Self, Self);
+
 	/// Spread takes a block of elements within a packed field and repeats them to the full packing
 	/// width.
 	///
@@ -357,11 +370,7 @@ pub const fn len_packed_slice<P: PackedField>(packed: &[P]) -> usize {
 }
 
 /// Multiply packed field element by a subfield scalar.
-pub fn mul_by_subfield_scalar<P, FS>(val: P, multiplier: FS) -> P
-where
-	P: PackedExtension<FS, Scalar: ExtensionField<FS>>,
-	FS: Field,
-{
+pub fn mul_by_subfield_scalar<P: PackedExtension<FS>, FS: Field>(val: P, multiplier: FS) -> P {
 	use crate::underlier::UnderlierType;
 
 	// This is a workaround not to make the multiplication slower in certain cases.
@@ -374,6 +383,14 @@ where
 	} else {
 		P::cast_ext(P::cast_base(val) * P::PackedSubfield::broadcast(multiplier))
 	}
+}
+
+pub fn pack_slice<P: PackedField>(scalars: &[P::Scalar]) -> Vec<P> {
+	let mut packed_slice = vec![P::default(); scalars.len() / P::WIDTH];
+	for (i, scalar) in scalars.iter().enumerate() {
+		set_packed_slice(&mut packed_slice, i, *scalar);
+	}
+	packed_slice
 }
 
 impl<F: Field> Broadcast<F> for F {
@@ -425,6 +442,10 @@ impl<F: Field> PackedField for F {
 
 	fn interleave(self, _other: Self, _log_block_len: usize) -> (Self, Self) {
 		panic!("cannot interleave when WIDTH = 1");
+	}
+
+	fn unzip(self, _other: Self, _log_block_len: usize) -> (Self, Self) {
+		panic!("cannot transpose when WIDTH = 1");
 	}
 
 	fn broadcast(scalar: Self::Scalar) -> Self {
@@ -495,7 +516,7 @@ mod tests {
 	}
 
 	/// Run the test for all the packed fields defined in this crate.
-	fn run_for_all_packed_fields(test: impl PackedFieldTest) {
+	fn run_for_all_packed_fields(test: &impl PackedFieldTest) {
 		// canonical tower
 
 		test.run::<BinaryField1b>();
@@ -665,6 +686,6 @@ mod tests {
 
 	#[test]
 	fn test_iteration() {
-		run_for_all_packed_fields(PackedFieldIterationTest);
+		run_for_all_packed_fields(&PackedFieldIterationTest);
 	}
 }

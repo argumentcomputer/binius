@@ -2,13 +2,9 @@
 
 use std::ops::Range;
 
-use binius_field::{
-	util::eq, ExtensionField, Field, PackedExtension, PackedField, PackedFieldIndexable,
-};
+use binius_field::{util::eq, Field, PackedExtension, PackedField, PackedFieldIndexable};
 use binius_hal::{ComputationBackend, SumcheckEvaluator};
-use binius_math::{
-	CompositionPolyOS, EvaluationDomainFactory, InterpolationDomain, MultilinearPoly,
-};
+use binius_math::{CompositionPoly, EvaluationDomainFactory, InterpolationDomain, MultilinearPoly};
 use binius_maybe_rayon::prelude::*;
 use binius_utils::bail;
 use itertools::izip;
@@ -48,12 +44,10 @@ where
 
 impl<'a, F, FDomain, P, Composition, M, Backend> GPAProver<'a, FDomain, P, Composition, M, Backend>
 where
-	F: Field + ExtensionField<FDomain>,
+	F: Field,
 	FDomain: Field,
-	P: PackedFieldIndexable<Scalar = F>
-		+ PackedExtension<F, PackedSubfield = P>
-		+ PackedExtension<FDomain>,
-	Composition: CompositionPolyOS<P>,
+	P: PackedFieldIndexable<Scalar = F> + PackedExtension<FDomain>,
+	Composition: CompositionPoly<P>,
 	M: MultilinearPoly<P> + Send + Sync,
 	Backend: ComputationBackend,
 {
@@ -104,8 +98,8 @@ where
 
 		let evaluation_points = domains
 			.iter()
-			.max_by_key(|domain| domain.points().len())
-			.map_or_else(|| Vec::new(), |domain| domain.points().to_vec());
+			.max_by_key(|domain| domain.size())
+			.map_or_else(|| Vec::new(), |domain| domain.finite_points().to_vec());
 
 		let state = ProverState::new(
 			multilinears,
@@ -193,12 +187,12 @@ where
 impl<F, FDomain, P, Composition, M, Backend> SumcheckProver<F>
 	for GPAProver<'_, FDomain, P, Composition, M, Backend>
 where
-	F: Field + ExtensionField<FDomain>,
+	F: Field,
 	FDomain: Field,
 	P: PackedFieldIndexable<Scalar = F>
 		+ PackedExtension<F, PackedSubfield = P>
 		+ PackedExtension<FDomain>,
-	Composition: CompositionPolyOS<P>,
+	Composition: CompositionPoly<P>,
 	M: MultilinearPoly<P> + Send + Sync,
 	Backend: ComputationBackend,
 {
@@ -229,7 +223,7 @@ where
 			})
 			.collect::<Vec<_>>();
 
-		let evals = self.state.calculate_later_round_evals(&evaluators)?;
+		let evals = self.state.calculate_round_evals(&evaluators)?;
 		let coeffs =
 			self.state
 				.calculate_round_coeffs_from_evals(&evaluators, batch_coeff, evals)?;
@@ -287,13 +281,13 @@ where
 	gpa_round_challenge: P::Scalar,
 }
 
-impl<F, P, FDomain, Composition> SumcheckEvaluator<F, P, Composition>
+impl<F, P, FDomain, Composition> SumcheckEvaluator<P, Composition>
 	for GPAEvaluator<'_, P, FDomain, Composition>
 where
-	F: Field + ExtensionField<FDomain>,
+	F: Field,
 	P: PackedField<Scalar = F> + PackedExtension<F, PackedSubfield = P> + PackedExtension<FDomain>,
 	FDomain: Field,
-	Composition: CompositionPolyOS<P>,
+	Composition: CompositionPoly<P>,
 {
 	fn eval_point_indices(&self) -> Range<usize> {
 		// By definition of grand product GKR circuit, the composition evaluation is a multilinear
@@ -344,10 +338,10 @@ where
 impl<F, P, FDomain, Composition> SumcheckInterpolator<F>
 	for GPAEvaluator<'_, P, FDomain, Composition>
 where
-	F: Field + ExtensionField<FDomain>,
+	F: Field,
 	P: PackedField<Scalar = F> + PackedExtension<FDomain>,
 	FDomain: Field,
-	Composition: CompositionPolyOS<P>,
+	Composition: CompositionPoly<P>,
 {
 	#[instrument(
 		skip_all,

@@ -2,34 +2,19 @@
 
 use anyhow::Result;
 use binius_core::oracle::OracleId;
-use binius_field::{
-	as_packed_field::{PackScalar, PackedType},
-	underlier::UnderlierType,
-	BinaryField, BinaryField16b, BinaryField32b, BinaryField8b, ExtensionField,
-	PackedFieldIndexable, TowerField,
-};
-use bytemuck::Pod;
+use binius_field::{BinaryField32b, TowerField};
 
 use crate::builder::ConstraintSystemBuilder;
 
-type B8 = BinaryField8b;
-type B16 = BinaryField16b;
 type B32 = BinaryField32b;
 const T_LOG_SIZE_MUL: usize = 16;
 const T_LOG_SIZE_ADD: usize = 17;
 const T_LOG_SIZE_DCI: usize = 10;
 
-pub fn mul_lookup<U, F>(
-	builder: &mut ConstraintSystemBuilder<U, F>,
+pub fn mul_lookup(
+	builder: &mut ConstraintSystemBuilder,
 	name: impl ToString + Clone,
-) -> Result<OracleId, anyhow::Error>
-where
-	U: Pod + UnderlierType + PackScalar<B8> + PackScalar<B16> + PackScalar<B32> + PackScalar<F>,
-	PackedType<U, B8>: PackedFieldIndexable,
-	PackedType<U, B16>: PackedFieldIndexable,
-	PackedType<U, B32>: PackedFieldIndexable,
-	F: TowerField + BinaryField + ExtensionField<B8> + ExtensionField<B16> + ExtensionField<B32>,
-{
+) -> Result<OracleId, anyhow::Error> {
 	builder.push_namespace(name);
 
 	let lookup_t = builder.add_committed("lookup_t", T_LOG_SIZE_MUL, B32::TOWER_LEVEL);
@@ -53,17 +38,10 @@ where
 	Ok(lookup_t)
 }
 
-pub fn add_lookup<U, F>(
-	builder: &mut ConstraintSystemBuilder<U, F>,
+pub fn add_lookup(
+	builder: &mut ConstraintSystemBuilder,
 	name: impl ToString + Clone,
-) -> Result<OracleId, anyhow::Error>
-where
-	U: Pod + UnderlierType + PackScalar<B8> + PackScalar<B16> + PackScalar<B32> + PackScalar<F>,
-	PackedType<U, B8>: PackedFieldIndexable,
-	PackedType<U, B16>: PackedFieldIndexable,
-	PackedType<U, B32>: PackedFieldIndexable,
-	F: TowerField + BinaryField + ExtensionField<B8> + ExtensionField<B16> + ExtensionField<B32>,
-{
+) -> Result<OracleId, anyhow::Error> {
 	builder.push_namespace(name);
 
 	let lookup_t = builder.add_committed("lookup_t", T_LOG_SIZE_ADD, B32::TOWER_LEVEL);
@@ -95,17 +73,10 @@ where
 	Ok(lookup_t)
 }
 
-pub fn add_carryfree_lookup<U, F>(
-	builder: &mut ConstraintSystemBuilder<U, F>,
+pub fn add_carryfree_lookup(
+	builder: &mut ConstraintSystemBuilder,
 	name: impl ToString + Clone,
-) -> Result<OracleId, anyhow::Error>
-where
-	U: Pod + UnderlierType + PackScalar<B8> + PackScalar<B16> + PackScalar<B32> + PackScalar<F>,
-	PackedType<U, B8>: PackedFieldIndexable,
-	PackedType<U, B16>: PackedFieldIndexable,
-	PackedType<U, B32>: PackedFieldIndexable,
-	F: TowerField + BinaryField + ExtensionField<B8> + ExtensionField<B16> + ExtensionField<B32>,
-{
+) -> Result<OracleId, anyhow::Error> {
 	builder.push_namespace(name);
 
 	let lookup_t = builder.add_committed("lookup_t", T_LOG_SIZE_ADD, B32::TOWER_LEVEL);
@@ -139,17 +110,10 @@ where
 	Ok(lookup_t)
 }
 
-pub fn dci_lookup<U, F>(
-	builder: &mut ConstraintSystemBuilder<U, F>,
+pub fn dci_lookup(
+	builder: &mut ConstraintSystemBuilder,
 	name: impl ToString + Clone,
-) -> Result<OracleId, anyhow::Error>
-where
-	U: Pod + UnderlierType + PackScalar<B8> + PackScalar<B16> + PackScalar<B32> + PackScalar<F>,
-	PackedType<U, B8>: PackedFieldIndexable,
-	PackedType<U, B16>: PackedFieldIndexable,
-	PackedType<U, B32>: PackedFieldIndexable,
-	F: TowerField + BinaryField + ExtensionField<B8> + ExtensionField<B16> + ExtensionField<B32>,
-{
+) -> Result<OracleId, anyhow::Error> {
 	builder.push_namespace(name);
 
 	let lookup_t = builder.add_committed("lookup_t", T_LOG_SIZE_DCI, B32::TOWER_LEVEL);
@@ -181,4 +145,126 @@ where
 
 	builder.pop_namespace();
 	Ok(lookup_t)
+}
+
+#[cfg(test)]
+mod tests {
+	use binius_field::{BinaryField1b, BinaryField32b, BinaryField8b};
+
+	use crate::{
+		builder::test_utils::test_circuit,
+		lasso::{self, batch::LookupBatch},
+		unconstrained::unconstrained,
+	};
+
+	#[test]
+	fn test_lasso_u8add_carryfree_rejects_carry() {
+		// TODO: Make this test 100% certain to pass instead of 2^14 bits of security from randomness
+		test_circuit(|builder| {
+			let log_size = 14;
+			let x_in = unconstrained::<BinaryField8b>(builder, "x", log_size)?;
+			let y_in = unconstrained::<BinaryField8b>(builder, "y", log_size)?;
+			let c_in = unconstrained::<BinaryField1b>(builder, "c", log_size)?;
+
+			let lookup_t = super::add_carryfree_lookup(builder, "add cf table")?;
+			let mut lookup_batch = LookupBatch::new([lookup_t]);
+			let _sum_and_cout = lasso::u8add_carryfree(
+				builder,
+				&mut lookup_batch,
+				"lasso_u8add",
+				x_in,
+				y_in,
+				c_in,
+				log_size,
+			)?;
+			lookup_batch.execute::<BinaryField32b>(builder)?;
+			Ok(vec![])
+		})
+		.expect_err("Rejected overflowing add");
+	}
+
+	#[test]
+	fn test_lasso_u8mul() {
+		test_circuit(|builder| {
+			let log_size = 10;
+
+			let mult_a = unconstrained::<BinaryField8b>(builder, "mult_a", log_size)?;
+			let mult_b = unconstrained::<BinaryField8b>(builder, "mult_b", log_size)?;
+
+			let mul_lookup_table = super::mul_lookup(builder, "mul table")?;
+
+			let mut lookup_batch = LookupBatch::new([mul_lookup_table]);
+
+			let _product = lasso::u8mul(
+				builder,
+				&mut lookup_batch,
+				"lasso_u8mul",
+				mult_a,
+				mult_b,
+				1 << log_size,
+			)?;
+
+			lookup_batch.execute::<BinaryField32b>(builder)?;
+			Ok(vec![])
+		})
+		.unwrap();
+	}
+
+	#[test]
+	fn test_lasso_batched_u8mul() {
+		test_circuit(|builder| {
+			let log_size = 10;
+			let mul_lookup_table = super::mul_lookup(builder, "mul table")?;
+
+			let mut lookup_batch = LookupBatch::new([mul_lookup_table]);
+
+			for _ in 0..10 {
+				let mult_a = unconstrained::<BinaryField8b>(builder, "mult_a", log_size)?;
+				let mult_b = unconstrained::<BinaryField8b>(builder, "mult_b", log_size)?;
+
+				let _product = lasso::u8mul(
+					builder,
+					&mut lookup_batch,
+					"lasso_u8mul",
+					mult_a,
+					mult_b,
+					1 << log_size,
+				)?;
+			}
+
+			lookup_batch.execute::<BinaryField32b>(builder)?;
+			Ok(vec![])
+		})
+		.unwrap();
+	}
+
+	#[test]
+	fn test_lasso_batched_u8mul_rejects() {
+		test_circuit(|builder| {
+			let log_size = 10;
+
+			// We try to feed in the add table instead
+			let mul_lookup_table = super::add_lookup(builder, "mul table")?;
+
+			let mut lookup_batch = LookupBatch::new([mul_lookup_table]);
+
+			// TODO?: Make this test fail 100% of the time, even though its almost impossible with rng
+			for _ in 0..10 {
+				let mult_a = unconstrained::<BinaryField8b>(builder, "mult_a", log_size)?;
+				let mult_b = unconstrained::<BinaryField8b>(builder, "mult_b", log_size)?;
+				let _product = lasso::u8mul(
+					builder,
+					&mut lookup_batch,
+					"lasso_u8mul",
+					mult_a,
+					mult_b,
+					1 << log_size,
+				)?;
+			}
+
+			lookup_batch.execute::<BinaryField32b>(builder)?;
+			Ok(vec![])
+		})
+		.expect_err("Channels should be unbalanced");
+	}
 }

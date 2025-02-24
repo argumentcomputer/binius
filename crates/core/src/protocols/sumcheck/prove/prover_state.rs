@@ -5,10 +5,10 @@ use std::{
 	sync::atomic::{AtomicBool, Ordering},
 };
 
-use binius_field::{util::powers, ExtensionField, Field, PackedExtension, PackedField};
+use binius_field::{util::powers, Field, PackedExtension, PackedField};
 use binius_hal::{ComputationBackend, RoundEvals, SumcheckEvaluator, SumcheckMultilinear};
 use binius_math::{
-	evaluate_univariate, CompositionPolyOS, MLEDirectAdapter, MultilinearPoly, MultilinearQuery,
+	evaluate_univariate, CompositionPoly, MLEDirectAdapter, MultilinearPoly, MultilinearQuery,
 };
 use binius_maybe_rayon::prelude::*;
 use binius_utils::bail;
@@ -70,8 +70,8 @@ where
 impl<'a, FDomain, F, P, M, Backend> ProverState<'a, FDomain, P, M, Backend>
 where
 	FDomain: Field,
-	F: Field + ExtensionField<FDomain>,
-	P: PackedField<Scalar = F> + PackedExtension<F, PackedSubfield = P> + PackedExtension<FDomain>,
+	F: Field,
+	P: PackedField<Scalar = F> + PackedExtension<FDomain>,
 	M: MultilinearPoly<P> + Send + Sync,
 	Backend: ComputationBackend,
 {
@@ -191,8 +191,11 @@ where
 						ref mut large_field_folded_multilinear,
 					} => {
 						// Post-switchover, simply plug in challenge for the zeroth variable.
+						let single_variable_query = MultilinearQuery::expand(&[challenge]);
 						*large_field_folded_multilinear = MLEDirectAdapter::from(
-							large_field_folded_multilinear.evaluate_zeroth_variable(challenge)?,
+							large_field_folded_multilinear
+								.as_ref()
+								.evaluate_partial_low(single_variable_query.to_ref())?,
 						);
 					}
 				};
@@ -242,41 +245,17 @@ where
 			.collect()
 	}
 
-	/// Calculate the accumulated evaluations for the first sumcheck round.
-	#[instrument(skip_all, level = "debug")]
-	pub fn calculate_first_round_evals<FBase, Evaluator, Composition>(
-		&self,
-		evaluators: &[Evaluator],
-	) -> Result<Vec<RoundEvals<F>>, Error>
-	where
-		FBase: ExtensionField<FDomain>,
-		F: ExtensionField<FBase>,
-		P: PackedExtension<FBase>,
-		Evaluator: SumcheckEvaluator<FBase, P, Composition> + Sync,
-		Composition: CompositionPolyOS<P>,
-	{
-		Ok(self.backend.sumcheck_compute_first_round_evals(
-			self.n_vars,
-			&self.multilinears,
-			evaluators,
-			&self.evaluation_points,
-		)?)
-	}
-
 	/// Calculate the accumulated evaluations for an arbitrary sumcheck round.
-	///
-	/// See [`Self::calculate_first_round_evals`] for an optimized version of this method that
-	/// operates over small fields in the first round.
 	#[instrument(skip_all, level = "debug")]
-	pub fn calculate_later_round_evals<Evaluator, Composition>(
+	pub fn calculate_round_evals<Evaluator, Composition>(
 		&self,
 		evaluators: &[Evaluator],
 	) -> Result<Vec<RoundEvals<F>>, Error>
 	where
-		Evaluator: SumcheckEvaluator<F, P, Composition> + Sync,
-		Composition: CompositionPolyOS<P>,
+		Evaluator: SumcheckEvaluator<P, Composition> + Sync,
+		Composition: CompositionPoly<P>,
 	{
-		Ok(self.backend.sumcheck_compute_later_round_evals(
+		Ok(self.backend.sumcheck_compute_round_evals(
 			self.n_vars,
 			self.tensor_query.as_ref().map(Into::into),
 			&self.multilinears,

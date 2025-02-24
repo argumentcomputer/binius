@@ -2,16 +2,15 @@ use binius_circuits::builder::ConstraintSystemBuilder;
 use binius_core::{
 	constraint_system::validate::validate_witness, transparent::tower_basis::TowerBasis,
 };
-use binius_field::{arch::OptimalUnderlier, BinaryField128b, Field, TowerField};
+use binius_field::{BinaryField128b, Field, TowerField};
 
-type U = OptimalUnderlier;
 type F128 = BinaryField128b;
 
 // TowerBasis expects actually basis vectors written to the witness.
 // The form of basis could vary depending on 'iota' and 'k' parameters
 fn main() {
 	let allocator = bumpalo::Bump::new();
-	let mut builder = ConstraintSystemBuilder::<U, F128>::new_with_witness(&allocator);
+	let mut builder = ConstraintSystemBuilder::new_with_witness(&allocator);
 
 	let k = 3usize;
 	let iota = 4usize;

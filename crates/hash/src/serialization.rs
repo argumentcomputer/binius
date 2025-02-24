@@ -2,7 +2,7 @@
 
 use std::{borrow::Borrow, cmp::min};
 
-use binius_utils::serialization::SerializeBytes;
+use binius_utils::{SerializationMode, SerializeBytes};
 use bytes::{buf::UninitSlice, BufMut};
 use digest::{
 	core_api::{Block, BlockSizeUser},
@@ -75,7 +75,7 @@ where
 		let mut buffer = HashBuffer::new(&mut hasher);
 		for item in items {
 			item.borrow()
-				.serialize(&mut buffer)
+				.serialize(&mut buffer, SerializationMode::CanonicalTower)
 				.expect("HashBuffer has infinite capacity");
 		}
 	}

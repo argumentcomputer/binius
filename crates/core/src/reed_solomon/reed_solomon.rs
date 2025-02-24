@@ -15,7 +15,7 @@ use std::marker::PhantomData;
 use binius_field::{BinaryField, ExtensionField, PackedField, RepackedExtension};
 use binius_maybe_rayon::prelude::*;
 use binius_ntt::{AdditiveNTT, DynamicDispatchNTT, Error, NTTOptions, ThreadingSettings};
-use binius_utils::{bail, checked_arithmetics::checked_log_2};
+use binius_utils::bail;
 use getset::CopyGetters;
 use tracing::instrument;
 
@@ -40,7 +40,7 @@ where
 	pub fn new(
 		log_dimension: usize,
 		log_inv_rate: usize,
-		ntt_options: NTTOptions,
+		ntt_options: &NTTOptions,
 	) -> Result<Self, Error> {
 		// Since we split work between log_inv_rate threads, we need to decrease the number of threads per each NTT transformation.
 		let ntt_log_threads = ntt_options
@@ -49,11 +49,11 @@ where
 			.saturating_sub(log_inv_rate);
 		let ntt = DynamicDispatchNTT::new(
 			log_dimension + log_inv_rate,
-			NTTOptions {
+			&NTTOptions {
 				thread_settings: ThreadingSettings::ExplicitThreadsCount {
 					log_threads: ntt_log_threads,
 				},
-				..ntt_options
+				precompute_twiddles: ntt_options.precompute_twiddles,
 			},
 		)?;
 
@@ -160,16 +160,11 @@ where
 	///
 	/// * If the `code` buffer does not have capacity for `len() << log_batch_size` field elements.
 	#[instrument(skip_all, level = "debug")]
-	pub fn encode_ext_batch_inplace<PE>(
+	pub fn encode_ext_batch_inplace<PE: RepackedExtension<P>>(
 		&self,
 		code: &mut [PE],
 		log_batch_size: usize,
-	) -> Result<(), Error>
-	where
-		PE: RepackedExtension<P>,
-		PE::Scalar: ExtensionField<<P as PackedField>::Scalar>,
-	{
-		let log_degree = checked_log_2(PE::Scalar::DEGREE);
-		self.encode_batch_inplace(PE::cast_bases_mut(code), log_batch_size + log_degree)
+	) -> Result<(), Error> {
+		self.encode_batch_inplace(PE::cast_bases_mut(code), log_batch_size + PE::Scalar::LOG_DEGREE)
 	}
 }

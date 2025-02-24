@@ -19,8 +19,8 @@ use crate::{
 	arch::binary_utils::{as_array_mut, as_array_ref},
 	arithmetic_traits::Broadcast,
 	underlier::{
-		impl_divisible, impl_iteration, NumCast, Random, SmallU, UnderlierType,
-		UnderlierWithBitOps, WithUnderlier, U1, U2, U4,
+		impl_divisible, impl_iteration, unpack_lo_128b_fallback, NumCast, Random, SmallU,
+		UnderlierType, UnderlierWithBitOps, WithUnderlier, U1, U2, U4,
 	},
 	BinaryField,
 };
@@ -337,6 +337,40 @@ impl UnderlierWithBitOps for M128 {
 			_ => panic!("unsupported bit count"),
 		}
 	}
+
+	#[inline(always)]
+	fn shl_128b_lanes(self, rhs: usize) -> Self {
+		Self(self.0 << rhs)
+	}
+
+	#[inline(always)]
+	fn shr_128b_lanes(self, rhs: usize) -> Self {
+		Self(self.0 >> rhs)
+	}
+
+	#[inline(always)]
+	fn unpack_lo_128b_lanes(self, rhs: Self, log_block_len: usize) -> Self {
+		match log_block_len {
+			0..3 => unpack_lo_128b_fallback(self, rhs, log_block_len),
+			3 => unsafe { vzip1q_u8(self.into(), rhs.into()).into() },
+			4 => unsafe { vzip1q_u16(self.into(), rhs.into()).into() },
+			5 => unsafe { vzip1q_u32(self.into(), rhs.into()).into() },
+			6 => unsafe { vzip1q_u64(self.into(), rhs.into()).into() },
+			_ => panic!("Unsupported block length"),
+		}
+	}
+
+	#[inline(always)]
+	fn unpack_hi_128b_lanes(self, rhs: Self, log_block_len: usize) -> Self {
+		match log_block_len {
+			0..3 => unpack_lo_128b_fallback(self, rhs, log_block_len),
+			3 => unsafe { vzip2q_u8(self.into(), rhs.into()).into() },
+			4 => unsafe { vzip2q_u16(self.into(), rhs.into()).into() },
+			5 => unsafe { vzip2q_u32(self.into(), rhs.into()).into() },
+			6 => unsafe { vzip2q_u64(self.into(), rhs.into()).into() },
+			_ => panic!("Unsupported block length"),
+		}
+	}
 }
 
 impl UnderlierWithBitConstants for M128 {
@@ -396,6 +430,37 @@ impl UnderlierWithBitConstants for M128 {
 					let c = vtrn1q_u64(a, b);
 					let d = vtrn2q_u64(a, b);
 					(c.into(), d.into())
+				}
+				_ => panic!("Unsupported block length"),
+			}
+		}
+	}
+
+	#[inline]
+	fn transpose(self, other: Self, log_block_len: usize) -> (Self, Self) {
+		unsafe {
+			match log_block_len {
+				0..=3 => {
+					let (a, b) = (self.into(), other.into());
+					let (mut a, mut b) = (Self::from(vuzp1q_u8(a, b)), Self::from(vuzp2q_u8(a, b)));
+
+					for log_block_len in (log_block_len..3).rev() {
+						(a, b) = a.interleave(b, log_block_len);
+					}
+
+					(a, b)
+				}
+				4 => {
+					let (a, b) = (self.into(), other.into());
+					(vuzp1q_u16(a, b).into(), vuzp2q_u16(a, b).into())
+				}
+				5 => {
+					let (a, b) = (self.into(), other.into());
+					(vuzp1q_u32(a, b).into(), vuzp2q_u32(a, b).into())
+				}
+				6 => {
+					let (a, b) = (self.into(), other.into());
+					(vuzp1q_u64(a, b).into(), vuzp2q_u64(a, b).into())
 				}
 				_ => panic!("Unsupported block length"),
 			}

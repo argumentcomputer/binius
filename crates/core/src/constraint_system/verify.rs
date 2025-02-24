@@ -4,7 +4,7 @@ use std::{cmp::Reverse, iter};
 
 use binius_field::{BinaryField, PackedField, TowerField};
 use binius_hash::PseudoCompressionFunction;
-use binius_math::{ArithExpr, CompositionPolyOS};
+use binius_math::{ArithExpr, CompositionPoly};
 use binius_utils::{bail, checked_arithmetics::log2_ceil_usize};
 use digest::{core_api::BlockSizeUser, Digest, Output};
 use itertools::{izip, multiunzip, Itertools};
@@ -75,12 +75,7 @@ where
 	let Proof { transcript } = proof;
 
 	let mut transcript = VerifierTranscript::<Challenger_>::new(transcript);
-	{
-		let mut observer = transcript.observe();
-		for boundary in boundaries {
-			boundary.write_to(&mut observer);
-		}
-	}
+	transcript.observe().write_slice(boundaries);
 
 	let merkle_scheme = BinaryMerkleTreeScheme::<_, Hash, _>::new(Compress::default());
 	let (commit_meta, oracle_to_commit_index) = piop::make_oracle_commit_meta(&oracles)?;
@@ -155,7 +150,7 @@ where
 	let (flush_oracle_ids, flush_selectors, flush_final_layer_claims) =
 		reorder_for_flushing_by_n_vars(
 			&oracles,
-			flush_oracle_ids,
+			&flush_oracle_ids,
 			flush_selectors,
 			flush_final_layer_claims,
 		);
@@ -284,7 +279,7 @@ where
 	let system = ring_switch::EvalClaimSystem::new(
 		&oracles,
 		&commit_meta,
-		oracle_to_commit_index,
+		&oracle_to_commit_index,
 		&eval_claims,
 	)?;
 
@@ -315,7 +310,7 @@ pub fn max_n_vars_and_skip_rounds<F, Composition>(
 ) -> (usize, usize)
 where
 	F: TowerField,
-	Composition: CompositionPolyOS<F>,
+	Composition: CompositionPoly<F>,
 {
 	let max_n_vars = max_n_vars(zerocheck_claims);
 
@@ -339,7 +334,7 @@ where
 fn max_n_vars<F, Composition>(zerocheck_claims: &[ZerocheckClaim<F, Composition>]) -> usize
 where
 	F: TowerField,
-	Composition: CompositionPolyOS<F>,
+	Composition: CompositionPoly<F>,
 {
 	zerocheck_claims
 		.iter()
@@ -572,7 +567,7 @@ pub fn get_flush_dedup_sumcheck_metas<F: TowerField>(
 #[derive(Debug)]
 pub struct FlushSumcheckComposition;
 
-impl<P: PackedField> CompositionPolyOS<P> for FlushSumcheckComposition {
+impl<P: PackedField> CompositionPoly<P> for FlushSumcheckComposition {
 	fn n_vars(&self) -> usize {
 		2
 	}
@@ -644,7 +639,7 @@ pub fn get_post_flush_sumcheck_eval_claims_without_eq<F: TowerField>(
 	Ok(evalcheck_claims)
 }
 
-pub struct DedupSumcheckClaims<F: TowerField, Composition: CompositionPolyOS<F>> {
+pub struct DedupSumcheckClaims<F: TowerField, Composition: CompositionPoly<F>> {
 	sumcheck_claims: Vec<SumcheckClaim<F, Composition>>,
 	gkr_eval_points: Vec<Vec<F>>,
 	flush_selectors_unique_by_claim: Vec<Vec<OracleId>>,
@@ -654,7 +649,7 @@ pub struct DedupSumcheckClaims<F: TowerField, Composition: CompositionPolyOS<F>>
 #[allow(clippy::type_complexity)]
 pub fn get_flush_dedup_sumcheck_claims<F: TowerField>(
 	flush_sumcheck_metas: Vec<FlushSumcheckMeta<F>>,
-) -> Result<DedupSumcheckClaims<F, impl CompositionPolyOS<F>>, Error> {
+) -> Result<DedupSumcheckClaims<F, impl CompositionPoly<F>>, Error> {
 	let n_claims = flush_sumcheck_metas.len();
 	let mut sumcheck_claims = Vec::with_capacity(n_claims);
 	let mut gkr_eval_points = Vec::with_capacity(n_claims);
@@ -698,7 +693,7 @@ pub fn get_flush_dedup_sumcheck_claims<F: TowerField>(
 
 pub fn reorder_for_flushing_by_n_vars<F: TowerField>(
 	oracles: &MultilinearOracleSet<F>,
-	flush_oracle_ids: Vec<OracleId>,
+	flush_oracle_ids: &[OracleId],
 	flush_selectors: Vec<OracleId>,
 	flush_final_layer_claims: Vec<LayerClaim<F>>,
 ) -> (Vec<OracleId>, Vec<usize>, Vec<LayerClaim<F>>) {

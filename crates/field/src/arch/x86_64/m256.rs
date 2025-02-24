@@ -9,6 +9,7 @@ use std::{
 use bytemuck::{must_cast, Pod, Zeroable};
 use cfg_if::cfg_if;
 use rand::{Rng, RngCore};
+use seq_macro::seq;
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
 use crate::{
@@ -20,11 +21,13 @@ use crate::{
 				interleave_mask_even, interleave_mask_odd, UnderlierWithBitConstants,
 			},
 		},
+		x86_64::m128::bitshift_128b,
 	},
 	arithmetic_traits::Broadcast,
 	underlier::{
 		get_block_values, get_spread_bytes, impl_divisible, impl_iteration, spread_fallback,
-		NumCast, Random, SmallU, UnderlierType, UnderlierWithBitOps, WithUnderlier, U1, U2, U4,
+		unpack_hi_128b_fallback, unpack_lo_128b_fallback, NumCast, Random, SmallU, UnderlierType,
+		UnderlierWithBitOps, WithUnderlier, U1, U2, U4,
 	},
 	BinaryField,
 };
@@ -323,7 +326,7 @@ impl UnderlierType for M256 {
 
 impl UnderlierWithBitOps for M256 {
 	const ZERO: Self = { Self(m256_from_u128s!(0, 0,)) };
-	const ONE: Self = { Self(m256_from_u128s!(0, 1,)) };
+	const ONE: Self = { Self(m256_from_u128s!(1, 0,)) };
 	const ONES: Self = { Self(m256_from_u128s!(u128::MAX, u128::MAX,)) };
 
 	#[inline]
@@ -463,42 +466,41 @@ impl UnderlierWithBitOps for M256 {
 		T: UnderlierType + NumCast<Self>,
 	{
 		match T::BITS {
-			1 | 2 | 4 | 8 | 16 | 32 => {
-				let elements_in_64 = 64 / T::BITS;
-				let chunk_64 = unsafe {
-					match i / elements_in_64 {
-						0 => _mm256_extract_epi64(self.0, 0),
-						1 => _mm256_extract_epi64(self.0, 1),
-						2 => _mm256_extract_epi64(self.0, 2),
-						_ => _mm256_extract_epi64(self.0, 3),
-					}
-				};
+			1 | 2 | 4 => {
+				let elements_in_8 = 8 / T::BITS;
+				let mut value_u8 = as_array_ref::<_, u8, 32, _>(self, |arr| unsafe {
+					*arr.get_unchecked(i / elements_in_8)
+				});
 
-				let result_64 = if T::BITS == 64 {
-					chunk_64
-				} else {
-					let ones = ((1u128 << T::BITS) - 1) as u64;
-					let val_64 = (chunk_64 as u64) >> (T::BITS * (i % elements_in_64)) & ones;
+				let shift = (i % elements_in_8) * T::BITS;
+				value_u8 >>= shift;
 
-					val_64 as i64
-				};
-				T::num_cast_from(Self(unsafe { _mm256_set_epi64x(0, 0, 0, result_64) }))
+				T::from_underlier(T::num_cast_from(Self::from(value_u8)))
 			}
-			// NOTE: benchmark show that this strategy is optimal for getting 64-bit subvalues from 256-bit register.
-			// However using similar code for 1..32 bits is slower than the version above.
-			// Also even getting `chunk_64` in the code above using this code shows worser benchmarks results.
+			8 => {
+				let value_u8 =
+					as_array_ref::<_, u8, 32, _>(self, |arr| unsafe { *arr.get_unchecked(i) });
+				T::from_underlier(T::num_cast_from(Self::from(value_u8)))
+			}
+			16 => {
+				let value_u16 =
+					as_array_ref::<_, u16, 16, _>(self, |arr| unsafe { *arr.get_unchecked(i) });
+				T::from_underlier(T::num_cast_from(Self::from(value_u16)))
+			}
+			32 => {
+				let value_u32 =
+					as_array_ref::<_, u32, 8, _>(self, |arr| unsafe { *arr.get_unchecked(i) });
+				T::from_underlier(T::num_cast_from(Self::from(value_u32)))
+			}
 			64 => {
-				T::num_cast_from(as_array_ref::<_, u64, 4, _>(self, |array| Self::from(array[i])))
+				let value_u64 =
+					as_array_ref::<_, u64, 4, _>(self, |arr| unsafe { *arr.get_unchecked(i) });
+				T::from_underlier(T::num_cast_from(Self::from(value_u64)))
 			}
 			128 => {
-				let chunk_128 = unsafe {
-					if i == 0 {
-						_mm256_extracti128_si256(self.0, 0)
-					} else {
-						_mm256_extracti128_si256(self.0, 1)
-					}
-				};
-				T::num_cast_from(Self(unsafe { _mm256_set_m128i(_mm_setzero_si128(), chunk_128) }))
+				let value_u128 =
+					as_array_ref::<_, u128, 2, _>(self, |arr| unsafe { *arr.get_unchecked(i) });
+				T::from_underlier(T::num_cast_from(Self::from(value_u128)))
 			}
 			_ => panic!("unsupported bit count"),
 		}
@@ -518,26 +520,26 @@ impl UnderlierWithBitOps for M256 {
 				let val = u8::num_cast_from(Self::from(val)) << shift;
 				let mask = mask << shift;
 
-				as_array_mut::<_, u8, 32>(self, |array| {
-					let element = &mut array[i / elements_in_8];
+				as_array_mut::<_, u8, 32>(self, |array| unsafe {
+					let element = array.get_unchecked_mut(i / elements_in_8);
 					*element &= !mask;
 					*element |= val;
 				});
 			}
-			8 => as_array_mut::<_, u8, 32>(self, |array| {
-				array[i] = u8::num_cast_from(Self::from(val));
+			8 => as_array_mut::<_, u8, 32>(self, |array| unsafe {
+				*array.get_unchecked_mut(i) = u8::num_cast_from(Self::from(val));
 			}),
-			16 => as_array_mut::<_, u16, 16>(self, |array| {
-				array[i] = u16::num_cast_from(Self::from(val));
+			16 => as_array_mut::<_, u16, 16>(self, |array| unsafe {
+				*array.get_unchecked_mut(i) = u16::num_cast_from(Self::from(val));
 			}),
-			32 => as_array_mut::<_, u32, 8>(self, |array| {
-				array[i] = u32::num_cast_from(Self::from(val));
+			32 => as_array_mut::<_, u32, 8>(self, |array| unsafe {
+				*array.get_unchecked_mut(i) = u32::num_cast_from(Self::from(val));
 			}),
-			64 => as_array_mut::<_, u64, 4>(self, |array| {
-				array[i] = u64::num_cast_from(Self::from(val));
+			64 => as_array_mut::<_, u64, 4>(self, |array| unsafe {
+				*array.get_unchecked_mut(i) = u64::num_cast_from(Self::from(val));
 			}),
 			128 => as_array_mut::<_, u128, 2>(self, |array| {
-				array[i] = u128::num_cast_from(Self::from(val));
+				*array.get_unchecked_mut(i) = u128::num_cast_from(Self::from(val));
 			}),
 			_ => panic!("unsupported bit count"),
 		}
@@ -835,6 +837,58 @@ impl UnderlierWithBitOps for M256 {
 			_ => spread_fallback(self, log_block_len, block_idx),
 		}
 	}
+
+	#[inline]
+	fn shr_128b_lanes(self, rhs: usize) -> Self {
+		// This implementation is effective when `rhs` is known at compile-time.
+		// In our code this is always the case.
+		bitshift_128b!(
+			self.0,
+			rhs,
+			_mm256_bsrli_epi128,
+			_mm256_srli_epi64,
+			_mm256_slli_epi64,
+			_mm256_or_si256
+		)
+	}
+
+	#[inline]
+	fn shl_128b_lanes(self, rhs: usize) -> Self {
+		// This implementation is effective when `rhs` is known at compile-time.
+		// In our code this is always the case.
+		bitshift_128b!(
+			self.0,
+			rhs,
+			_mm256_bslli_epi128,
+			_mm256_slli_epi64,
+			_mm256_srli_epi64,
+			_mm256_or_si256
+		);
+	}
+
+	#[inline]
+	fn unpack_lo_128b_lanes(self, other: Self, log_block_len: usize) -> Self {
+		match log_block_len {
+			0..3 => unpack_lo_128b_fallback(self, other, log_block_len),
+			3 => unsafe { _mm256_unpacklo_epi8(self.0, other.0).into() },
+			4 => unsafe { _mm256_unpacklo_epi16(self.0, other.0).into() },
+			5 => unsafe { _mm256_unpacklo_epi32(self.0, other.0).into() },
+			6 => unsafe { _mm256_unpacklo_epi64(self.0, other.0).into() },
+			_ => panic!("unsupported block length"),
+		}
+	}
+
+	#[inline]
+	fn unpack_hi_128b_lanes(self, other: Self, log_block_len: usize) -> Self {
+		match log_block_len {
+			0..3 => unpack_hi_128b_fallback(self, other, log_block_len),
+			3 => unsafe { _mm256_unpackhi_epi8(self.0, other.0).into() },
+			4 => unsafe { _mm256_unpackhi_epi16(self.0, other.0).into() },
+			5 => unsafe { _mm256_unpackhi_epi32(self.0, other.0).into() },
+			6 => unsafe { _mm256_unpackhi_epi64(self.0, other.0).into() },
+			_ => panic!("unsupported block length"),
+		}
+	}
 }
 
 unsafe impl Zeroable for M256 {}
@@ -910,6 +964,13 @@ impl UnderlierWithBitConstants for M256 {
 		let (a, b) = unsafe { interleave_bits(self.0, other.0, log_block_len) };
 		(Self(a), Self(b))
 	}
+
+	fn transpose(mut self, mut other: Self, log_block_len: usize) -> (Self, Self) {
+		let (a, b) = unsafe { transpose_bits(self.0, other.0, log_block_len) };
+		self.0 = a;
+		other.0 = b;
+		(self, other)
+	}
 }
 
 #[inline]
@@ -972,6 +1033,57 @@ unsafe fn interleave_bits(a: __m256i, b: __m256i, log_block_len: usize) -> (__m2
 		}
 		_ => panic!("unsupported block length"),
 	}
+}
+
+#[inline]
+unsafe fn transpose_bits(a: __m256i, b: __m256i, log_block_len: usize) -> (__m256i, __m256i) {
+	match log_block_len {
+		0..=3 => {
+			let shuffle = _mm256_set_epi8(
+				15, 13, 11, 9, 7, 5, 3, 1, 14, 12, 10, 8, 6, 4, 2, 0, 15, 13, 11, 9, 7, 5, 3, 1,
+				14, 12, 10, 8, 6, 4, 2, 0,
+			);
+			let (mut a, mut b) = transpose_with_shuffle(a, b, shuffle);
+			for log_block_len in (log_block_len..3).rev() {
+				(a, b) = interleave_bits(a, b, log_block_len);
+			}
+
+			(a, b)
+		}
+		4 => {
+			let shuffle = _mm256_set_epi8(
+				15, 14, 11, 10, 7, 6, 3, 2, 13, 12, 9, 8, 5, 4, 1, 0, 15, 14, 11, 10, 7, 6, 3, 2,
+				13, 12, 9, 8, 5, 4, 1, 0,
+			);
+
+			transpose_with_shuffle(a, b, shuffle)
+		}
+		5 => {
+			let shuffle = _mm256_set_epi8(
+				15, 14, 13, 12, 7, 6, 5, 4, 11, 10, 9, 8, 3, 2, 1, 0, 15, 14, 13, 12, 7, 6, 5, 4,
+				11, 10, 9, 8, 3, 2, 1, 0,
+			);
+
+			transpose_with_shuffle(a, b, shuffle)
+		}
+		6 => {
+			let (a, b) = (_mm256_unpacklo_epi64(a, b), _mm256_unpackhi_epi64(a, b));
+
+			(_mm256_permute4x64_epi64(a, 0b11011000), _mm256_permute4x64_epi64(b, 0b11011000))
+		}
+		7 => (_mm256_permute2x128_si256(a, b, 0x20), _mm256_permute2x128_si256(a, b, 0x31)),
+		_ => panic!("unsupported block length"),
+	}
+}
+
+#[inline(always)]
+unsafe fn transpose_with_shuffle(a: __m256i, b: __m256i, shuffle: __m256i) -> (__m256i, __m256i) {
+	let a = _mm256_shuffle_epi8(a, shuffle);
+	let b = _mm256_shuffle_epi8(b, shuffle);
+
+	let (a, b) = (_mm256_unpacklo_epi64(a, b), _mm256_unpackhi_epi64(a, b));
+
+	(_mm256_permute4x64_epi64(a, 0b11011000), _mm256_permute4x64_epi64(b, 0b11011000))
 }
 
 #[inline]
@@ -1075,7 +1187,7 @@ mod tests {
 	fn test_constants() {
 		assert_eq!(M256::default(), M256::ZERO);
 		assert_eq!(M256::from(0u128), M256::ZERO);
-		assert_eq!(M256::from([0u128, 1u128]), M256::ONE);
+		assert_eq!(M256::from([1u128, 0u128]), M256::ONE);
 	}
 
 	#[derive(Default)]
@@ -1139,6 +1251,10 @@ mod tests {
 		}
 	}
 
+	fn get(value: M256, log_block_len: usize, index: usize) -> M256 {
+		(value >> (index << log_block_len)) & single_element_mask_bits::<M256>(1 << log_block_len)
+	}
+
 	proptest! {
 		#[allow(clippy::tuple_array_conversions)] // false positive
 		#[test]
@@ -1175,14 +1291,41 @@ mod tests {
 			let (c, d) = (M256::from(c), M256::from(d));
 
 			let block_len = 1usize << height;
-			let get = |v, i| {
-				u128::num_cast_from((v >> (i * block_len)) & single_element_mask_bits::<M256>(1 << height))
-			};
 			for i in (0..256/block_len).step_by(2) {
-				assert_eq!(get(c, i), get(a, i));
-				assert_eq!(get(c, i+1), get(b, i));
-				assert_eq!(get(d, i), get(a, i+1));
-				assert_eq!(get(d, i+1), get(b, i+1));
+				assert_eq!(get(c, height, i), get(a, height, i));
+				assert_eq!(get(c, height, i+1), get(b, height, i));
+				assert_eq!(get(d, height, i), get(a, height, i+1));
+				assert_eq!(get(d, height, i+1), get(b, height, i+1));
+			}
+		}
+
+		#[test]
+		fn test_unpack_lo(a in any::<[u128; 2]>(), b in any::<[u128; 2]>(), height in 0usize..7) {
+			let a = M256::from(a);
+			let b = M256::from(b);
+
+			let result = a.unpack_lo_128b_lanes(b, height);
+			let half_block_count = 128>>(height + 1);
+			for i in 0..half_block_count {
+				assert_eq!(get(result, height, 2*i), get(a, height, i));
+				assert_eq!(get(result, height, 2*i+1), get(b, height, i));
+				assert_eq!(get(result, height, 2*(i + half_block_count)), get(a, height, 2 * half_block_count + i));
+				assert_eq!(get(result, height, 2*(i + half_block_count)+1), get(b, height, 2 * half_block_count + i));
+			}
+		}
+
+		#[test]
+		fn test_unpack_hi(a in any::<[u128; 2]>(), b in any::<[u128; 2]>(), height in 0usize..7) {
+			let a = M256::from(a);
+			let b = M256::from(b);
+
+			let result = a.unpack_hi_128b_lanes(b, height);
+			let half_block_count = 128>>(height + 1);
+			for i in 0..half_block_count {
+				assert_eq!(get(result, height, 2*i), get(a, height, i + half_block_count));
+				assert_eq!(get(result, height, 2*i+1), get(b, height, i + half_block_count));
+				assert_eq!(get(result, height, 2*(half_block_count + i)), get(a, height, 3*half_block_count + i));
+				assert_eq!(get(result, height, 2*(half_block_count + i) +1), get(b, height, 3*half_block_count + i));
 			}
 		}
 	}

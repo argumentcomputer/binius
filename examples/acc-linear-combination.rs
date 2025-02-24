@@ -1,20 +1,17 @@
 use binius_circuits::{builder::ConstraintSystemBuilder, unconstrained::unconstrained};
 use binius_core::{constraint_system::validate::validate_witness, oracle::OracleId};
 use binius_field::{
-	arch::OptimalUnderlier, packed::set_packed_slice, BinaryField128b, BinaryField1b,
-	BinaryField8b, ExtensionField, TowerField,
+	packed::set_packed_slice, BinaryField1b, BinaryField8b, ExtensionField, TowerField,
 };
 use binius_macros::arith_expr;
 
-type U = OptimalUnderlier;
-type F128 = BinaryField128b;
 type F8 = BinaryField8b;
 type F1 = BinaryField1b;
 
 // FIXME: Following gadgets are unconstrained. Only for demonstrative purpose, don't use in production
 
 fn bytes_decomposition_gadget(
-	builder: &mut ConstraintSystemBuilder<U, F128>,
+	builder: &mut ConstraintSystemBuilder,
 	name: impl ToString,
 	log_size: usize,
 	input: OracleId,
@@ -146,7 +143,7 @@ fn bytes_decomposition_gadget(
 }
 
 fn elder_4bits_masking_gadget(
-	builder: &mut ConstraintSystemBuilder<U, F128>,
+	builder: &mut ConstraintSystemBuilder,
 	name: impl ToString,
 	log_size: usize,
 	input: OracleId,
@@ -241,12 +238,12 @@ fn elder_4bits_masking_gadget(
 
 fn main() {
 	let allocator = bumpalo::Bump::new();
-	let mut builder = ConstraintSystemBuilder::<U, F128>::new_with_witness(&allocator);
+	let mut builder = ConstraintSystemBuilder::new_with_witness(&allocator);
 
 	let log_size = 1usize;
 
 	// Define set of bytes that we want to decompose
-	let p_in = unconstrained::<U, F128, F8>(&mut builder, "p_in".to_string(), log_size).unwrap();
+	let p_in = unconstrained::<F8>(&mut builder, "p_in".to_string(), log_size).unwrap();
 
 	let _ =
 		bytes_decomposition_gadget(&mut builder, "bytes decomposition", log_size, p_in).unwrap();

@@ -4,22 +4,18 @@ use core::slice;
 use std::{any::TypeId, cmp::min, mem::MaybeUninit};
 
 use binius_field::{
-	arch::{byte_sliced::ByteSlicedAES32x128b, ArchOptimal, OptimalUnderlier},
-	packed::{get_packed_slice, set_packed_slice_unchecked},
+	arch::{ArchOptimal, OptimalUnderlier},
+	byte_iteration::{
+		can_iterate_bytes, create_partial_sums_lookup_tables, is_sequential_bytes, iterate_bytes,
+		ByteIteratorCallback, PackedSlice,
+	},
+	packed::{get_packed_slice, get_packed_slice_unchecked, set_packed_slice_unchecked},
 	underlier::{UnderlierWithBitOps, WithUnderlier},
-	AESTowerField128b, BinaryField128b, BinaryField128bPolyval, BinaryField1b, ByteSlicedAES32x16b,
-	ByteSlicedAES32x32b, ByteSlicedAES32x64b, ByteSlicedAES32x8b, ExtensionField, Field,
-	PackedBinaryField128x1b, PackedBinaryField16x1b, PackedBinaryField256x1b,
-	PackedBinaryField32x1b, PackedBinaryField512x1b, PackedBinaryField64x1b, PackedBinaryField8x1b,
-	PackedField,
-};
-use binius_maybe_rayon::{
-	iter::{IndexedParallelIterator, ParallelIterator},
-	slice::ParallelSliceMut,
+	AESTowerField128b, BinaryField128b, BinaryField128bPolyval, BinaryField1b, ExtensionField,
+	Field, PackedField,
 };
 use binius_utils::bail;
-use bytemuck::{fill_zeroes, Pod};
-use itertools::max;
+use bytemuck::fill_zeroes;
 use lazy_static::lazy_static;
 use stackalloc::helpers::slice_assume_init_mut;
 
@@ -29,6 +25,9 @@ use crate::Error;
 ///
 /// Every consequent `1 << log_query_size` scalar values are dot-producted with the corresponding
 /// query elements. The result is stored in the `output` slice of packed values.
+///
+/// Please note that this method is single threaded. Currently we always have some
+/// parallelism above this level, so it's not a problem.
 pub fn fold_right<P, PE>(
 	evals: &[P],
 	log_evals_size: usize,
@@ -49,7 +48,16 @@ where
 		return Ok(());
 	}
 
-	fold_right_fallback(evals, log_evals_size, query, log_query_size, out);
+	// Use linear interpolation for single variable multilinear queries.
+	let is_lerp = log_query_size == 1
+		&& get_packed_slice(query, 0) + get_packed_slice(query, 1) == PE::Scalar::ONE;
+
+	if is_lerp {
+		let lerp_query = get_packed_slice(query, 1);
+		fold_right_lerp(evals, log_evals_size, lerp_query, out);
+	} else {
+		fold_right_fallback(evals, log_evals_size, query, log_query_size, out);
+	}
 
 	Ok(())
 }
@@ -60,7 +68,7 @@ where
 /// with the corresponding query element. The results is written to the `output` slice of packed values.
 /// If the function returns `Ok(())`, then `out` can be safely interpreted as initialized.
 ///
-/// Please note that unlike `fold_right`, this method is single threaded. Currently we always have some
+/// Please note that this method is single threaded. Currently we always have some
 /// parallelism above this level, so it's not a problem. Having no parallelism inside allows us to
 /// use more efficient optimizations for special cases. If we ever need a parallel version of this
 /// function, we can implement it separately.
@@ -129,115 +137,6 @@ where
 	Ok(())
 }
 
-/// A marker trait that the slice of packed values can be iterated as a sequence of bytes.
-/// The order of the iteration by BinaryField1b subfield elements and bits within iterated bytes must
-/// be the same.
-///
-/// # Safety
-/// The implementor must ensure that the cast of the slice of packed values to the slice of bytes
-/// is safe and preserves the order of the 1-bit elements.
-#[allow(unused)]
-unsafe trait SequentialBytes: Pod {}
-
-unsafe impl SequentialBytes for PackedBinaryField8x1b {}
-unsafe impl SequentialBytes for PackedBinaryField16x1b {}
-unsafe impl SequentialBytes for PackedBinaryField32x1b {}
-unsafe impl SequentialBytes for PackedBinaryField64x1b {}
-unsafe impl SequentialBytes for PackedBinaryField128x1b {}
-unsafe impl SequentialBytes for PackedBinaryField256x1b {}
-unsafe impl SequentialBytes for PackedBinaryField512x1b {}
-
-/// Returns true if T implements `SequentialBytes` trait.
-/// Use a hack that exploits that array copying is optimized for the `Copy` types.
-/// Unfortunately there is no more proper way to perform this check this in Rust at runtime.
-#[allow(clippy::redundant_clone)]
-fn is_sequential_bytes<T>() -> bool {
-	struct X<U>(bool, std::marker::PhantomData<U>);
-
-	impl<U> Clone for X<U> {
-		fn clone(&self) -> Self {
-			Self(false, std::marker::PhantomData)
-		}
-	}
-
-	impl<U: SequentialBytes> Copy for X<U> {}
-
-	let value = [X::<T>(true, std::marker::PhantomData)];
-	let cloned = value.clone();
-
-	cloned[0].0
-}
-
-/// Returns if we can iterate over bytes, each representing 8 1-bit values.
-fn can_iterate_bytes<P: PackedField>() -> bool {
-	// Packed fields with sequential byte order
-	if is_sequential_bytes::<P>() {
-		return true;
-	}
-
-	// Byte-sliced fields
-	// Note: add more byte sliced types here as soon as they are added
-	match TypeId::of::<P>() {
-		x if x == TypeId::of::<ByteSlicedAES32x128b>() => true,
-		x if x == TypeId::of::<ByteSlicedAES32x64b>() => true,
-		x if x == TypeId::of::<ByteSlicedAES32x32b>() => true,
-		x if x == TypeId::of::<ByteSlicedAES32x16b>() => true,
-		x if x == TypeId::of::<ByteSlicedAES32x8b>() => true,
-		_ => false,
-	}
-}
-
-/// Helper macro to generate the iteration over bytes for byte-sliced types.
-macro_rules! iterate_byte_sliced {
-	($packed_type:ty, $data:ident, $f:ident) => {
-		assert_eq!(TypeId::of::<$packed_type>(), TypeId::of::<P>());
-
-		// Safety: the cast is safe because the type is checked by arm statement
-		let data =
-			unsafe { slice::from_raw_parts($data.as_ptr() as *const $packed_type, $data.len()) };
-		for value in data.iter() {
-			for i in 0..<$packed_type>::BYTES {
-				// Safety: j is less than `ByteSlicedAES32x128b::BYTES`
-				$f(unsafe { value.get_byte_unchecked(i) });
-			}
-		}
-	};
-}
-
-/// Iterate over bytes of a slice of the packed values.
-fn iterate_bytes<P: PackedField>(data: &[P], mut f: impl FnMut(u8)) {
-	if is_sequential_bytes::<P>() {
-		// Safety: `P` implements `SequentialBytes` trait, so the following cast is safe
-		// and preserves the order.
-		let bytes = unsafe {
-			std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
-		};
-		for byte in bytes {
-			f(*byte);
-		}
-	} else {
-		// Note: add more byte sliced types here as soon as they are added
-		match TypeId::of::<P>() {
-			x if x == TypeId::of::<ByteSlicedAES32x128b>() => {
-				iterate_byte_sliced!(ByteSlicedAES32x128b, data, f);
-			}
-			x if x == TypeId::of::<ByteSlicedAES32x64b>() => {
-				iterate_byte_sliced!(ByteSlicedAES32x64b, data, f);
-			}
-			x if x == TypeId::of::<ByteSlicedAES32x32b>() => {
-				iterate_byte_sliced!(ByteSlicedAES32x32b, data, f);
-			}
-			x if x == TypeId::of::<ByteSlicedAES32x16b>() => {
-				iterate_byte_sliced!(ByteSlicedAES32x16b, data, f);
-			}
-			x if x == TypeId::of::<ByteSlicedAES32x8b>() => {
-				iterate_byte_sliced!(ByteSlicedAES32x8b, data, f);
-			}
-			_ => unreachable!("packed field doesn't support byte iteration"),
-		}
-	}
-}
-
 /// Optimized version for 1-bit values with query size 0-2
 fn fold_right_1bit_evals_small_query<P, PE, const LOG_QUERY_SIZE: usize>(
 	evals: &[P],
@@ -251,18 +150,8 @@ where
 	if LOG_QUERY_SIZE >= 3 {
 		return false;
 	}
-	let chunk_size = 1
-		<< max(&[
-			10,
-			(P::LOG_WIDTH + LOG_QUERY_SIZE).saturating_sub(PE::LOG_WIDTH),
-			PE::LOG_WIDTH,
-		])
-		.unwrap();
-	if out.len() % chunk_size != 0 {
-		return false;
-	}
 
-	if P::WIDTH << LOG_QUERY_SIZE > chunk_size << PE::LOG_WIDTH {
+	if P::LOG_WIDTH + LOG_QUERY_SIZE > PE::LOG_WIDTH {
 		return false;
 	}
 
@@ -279,33 +168,43 @@ where
 		})
 		.collect::<Vec<_>>();
 
-	out.par_chunks_mut(chunk_size)
-		.enumerate()
-		.for_each(|(index, chunk)| {
-			let input_offset =
-				((index * chunk_size) << (LOG_QUERY_SIZE + PE::LOG_WIDTH)) / P::WIDTH;
-			let input_end =
-				(((index + 1) * chunk_size) << (LOG_QUERY_SIZE + PE::LOG_WIDTH)) / P::WIDTH;
+	struct Callback<'a, PE: PackedField, const LOG_QUERY_SIZE: usize> {
+		out: &'a mut [PE],
+		cached_table: &'a [PE::Scalar],
+	}
 
+	impl<PE: PackedField, const LOG_QUERY_SIZE: usize> ByteIteratorCallback
+		for Callback<'_, PE, LOG_QUERY_SIZE>
+	{
+		#[inline(always)]
+		fn call(&mut self, iterator: impl Iterator<Item = u8>) {
+			let mask = (1 << (1 << LOG_QUERY_SIZE)) - 1;
+			let values_in_byte = 1 << (3 - LOG_QUERY_SIZE);
 			let mut current_index = 0;
-			iterate_bytes(&evals[input_offset..input_end], |byte| {
-				let mask = (1 << (1 << LOG_QUERY_SIZE)) - 1;
-				let values_in_byte = 1 << (3 - LOG_QUERY_SIZE);
+			for byte in iterator {
 				for k in 0..values_in_byte {
 					let index = (byte >> (k * (1 << LOG_QUERY_SIZE))) & mask;
 					// Safety: `i` is less than `chunk_size`
 					unsafe {
 						set_packed_slice_unchecked(
-							chunk,
+							self.out,
 							current_index + k,
-							cached_table[index as usize],
+							self.cached_table[index as usize],
 						);
 					}
 				}
 
 				current_index += values_in_byte;
-			});
-		});
+			}
+		}
+	}
+
+	let mut callback = Callback::<'_, PE, LOG_QUERY_SIZE> {
+		out,
+		cached_table: &cached_table,
+	};
+
+	iterate_bytes(evals, &mut callback);
 
 	true
 }
@@ -323,61 +222,52 @@ where
 	if LOG_QUERY_SIZE < 3 {
 		return false;
 	}
-	let chunk_size = 1
-		<< max(&[
-			10,
-			(P::LOG_WIDTH + LOG_QUERY_SIZE).saturating_sub(PE::LOG_WIDTH),
-			PE::LOG_WIDTH,
-		])
-		.unwrap();
-	if out.len() % chunk_size != 0 {
+
+	if P::LOG_WIDTH + LOG_QUERY_SIZE > PE::LOG_WIDTH {
 		return false;
 	}
 
-	let log_tables_count = LOG_QUERY_SIZE - 3;
-	let tables_count = 1 << log_tables_count;
-	let cached_tables = (0..tables_count)
-		.map(|i| {
-			(0..256)
-				.map(|j| {
-					let mut result = PE::Scalar::ZERO;
-					for k in 0..8 {
-						if j >> k & 1 == 1 {
-							result += get_packed_slice(query, (i << 3) | k);
-						}
-					}
-					result
-				})
-				.collect::<Vec<_>>()
-		})
-		.collect::<Vec<_>>();
+	let cached_tables =
+		create_partial_sums_lookup_tables(PackedSlice::new(query, 1 << LOG_QUERY_SIZE));
 
-	out.par_chunks_mut(chunk_size)
-		.enumerate()
-		.for_each(|(index, chunk)| {
-			let input_offset =
-				((index * chunk_size) << (LOG_QUERY_SIZE + PE::LOG_WIDTH)) / P::WIDTH;
-			let input_end =
-				(((index + 1) * chunk_size) << (LOG_QUERY_SIZE + PE::LOG_WIDTH)) / P::WIDTH;
+	struct Callback<'a, PE: PackedField, const LOG_QUERY_SIZE: usize> {
+		out: &'a mut [PE],
+		cached_tables: &'a [PE::Scalar],
+	}
 
-			let mut current_value = PE::Scalar::ZERO;
-			let mut current_table = 0;
+	impl<PE: PackedField, const LOG_QUERY_SIZE: usize> ByteIteratorCallback
+		for Callback<'_, PE, LOG_QUERY_SIZE>
+	{
+		#[inline(always)]
+		fn call(&mut self, iterator: impl Iterator<Item = u8>) {
+			let log_tables_count = LOG_QUERY_SIZE - 3;
+			let tables_count = 1 << log_tables_count;
 			let mut current_index = 0;
-			iterate_bytes(&evals[input_offset..input_end], |byte| {
-				current_value += cached_tables[current_table][byte as usize];
+			let mut current_table = 0;
+			let mut current_value = PE::Scalar::ZERO;
+			for byte in iterator {
+				current_value += self.cached_tables[(current_table << 8) + byte as usize];
 				current_table += 1;
 
 				if current_table == tables_count {
 					// Safety: `i` is less than `chunk_size`
 					unsafe {
-						set_packed_slice_unchecked(chunk, current_index, current_value);
+						set_packed_slice_unchecked(self.out, current_index, current_value);
 					}
-					current_table = 0;
 					current_index += 1;
+					current_table = 0;
 					current_value = PE::Scalar::ZERO;
 				}
-			});
-		});
+			}
+		}
+	}
+
+	let mut callback = Callback::<'_, _, LOG_QUERY_SIZE> {
+		out,
+		cached_tables: &cached_tables,
+	};
+
+	iterate_bytes(evals, &mut callback);
 
 	true
 }
@@ -419,6 +309,46 @@ where
 	}
 }
 
+/// Specialized implementation for a single parameter right fold using linear interpolation
+/// instead of tensor expansion resulting in  a single multiplication instead of two:
+///   f(r||w) = r * (f(1||w) - f(0||w)) + f(0||w).
+///
+/// The same approach may be generalized to higher variable counts, with diminishing returns.
+fn fold_right_lerp<P, PE>(
+	evals: &[P],
+	log_evals_size: usize,
+	lerp_query: PE::Scalar,
+	out: &mut [PE],
+) where
+	P: PackedField,
+	PE: PackedField<Scalar: ExtensionField<P::Scalar>>,
+{
+	assert_eq!(1 << log_evals_size.saturating_sub(PE::LOG_WIDTH + 1), out.len());
+
+	out.iter_mut()
+		.enumerate()
+		.for_each(|(i, packed_result_eval)| {
+			for j in 0..min(PE::WIDTH, 1 << (log_evals_size - 1)) {
+				let index = (i << PE::LOG_WIDTH) | j;
+
+				let (eval0, eval1) = unsafe {
+					(
+						get_packed_slice_unchecked(evals, index << 1),
+						get_packed_slice_unchecked(evals, (index << 1) | 1),
+					)
+				};
+
+				let result_eval =
+					PE::Scalar::from(eval1 - eval0) * lerp_query + PE::Scalar::from(eval0);
+
+				// Safety: `j` < `PE::WIDTH`
+				unsafe {
+					packed_result_eval.set_unchecked(j, result_eval);
+				}
+			}
+		})
+}
+
 /// Fallback implementation for fold that can be executed for any field types and sizes.
 fn fold_right_fallback<P, PE>(
 	evals: &[P],
@@ -430,34 +360,26 @@ fn fold_right_fallback<P, PE>(
 	P: PackedField,
 	PE: PackedField<Scalar: ExtensionField<P::Scalar>>,
 {
-	const CHUNK_SIZE: usize = 1 << 10;
-	let packed_result_evals = out;
-	packed_result_evals
-		.par_chunks_mut(CHUNK_SIZE)
-		.enumerate()
-		.for_each(|(i, packed_result_evals)| {
-			for (k, packed_result_eval) in packed_result_evals.iter_mut().enumerate() {
-				let offset = i * CHUNK_SIZE;
-				for j in 0..min(PE::WIDTH, 1 << (log_evals_size - log_query_size)) {
-					let index = ((offset + k) << PE::LOG_WIDTH) | j;
+	for (k, packed_result_eval) in out.iter_mut().enumerate() {
+		for j in 0..min(PE::WIDTH, 1 << (log_evals_size - log_query_size)) {
+			let index = (k << PE::LOG_WIDTH) | j;
 
-					let offset = index << log_query_size;
+			let offset = index << log_query_size;
 
-					let mut result_eval = PE::Scalar::ZERO;
-					for (t, query_expansion) in PackedField::iter_slice(query)
-						.take(1 << log_query_size)
-						.enumerate()
-					{
-						result_eval += query_expansion * get_packed_slice(evals, t + offset);
-					}
-
-					// Safety: `j` < `PE::WIDTH`
-					unsafe {
-						packed_result_eval.set_unchecked(j, result_eval);
-					}
-				}
+			let mut result_eval = PE::Scalar::ZERO;
+			for (t, query_expansion) in PackedField::iter_slice(query)
+				.take(1 << log_query_size)
+				.enumerate()
+			{
+				result_eval += query_expansion * get_packed_slice(evals, t + offset);
 			}
-		});
+
+			// Safety: `j` < `PE::WIDTH`
+			unsafe {
+				packed_result_eval.set_unchecked(j, result_eval);
+			}
+		}
+	}
 }
 
 type ArchOptimaType<F> = <F as ArchOptimal>::OptimalThroughputPacked;
@@ -685,26 +607,12 @@ mod tests {
 	use std::iter::repeat_with;
 
 	use binius_field::{
-		packed::set_packed_slice, PackedBinaryField16x32b, PackedBinaryField16x8b,
-		PackedBinaryField4x1b, PackedBinaryField512x1b,
+		packed::set_packed_slice, PackedBinaryField128x1b, PackedBinaryField16x32b,
+		PackedBinaryField16x8b, PackedBinaryField512x1b, PackedBinaryField64x8b,
 	};
 	use rand::{rngs::StdRng, SeedableRng};
 
 	use super::*;
-
-	#[test]
-	fn test_sequential_bits() {
-		assert!(is_sequential_bytes::<PackedBinaryField8x1b>());
-		assert!(is_sequential_bytes::<PackedBinaryField16x1b>());
-		assert!(is_sequential_bytes::<PackedBinaryField32x1b>());
-		assert!(is_sequential_bytes::<PackedBinaryField64x1b>());
-		assert!(is_sequential_bytes::<PackedBinaryField128x1b>());
-		assert!(is_sequential_bytes::<PackedBinaryField256x1b>());
-		assert!(is_sequential_bytes::<PackedBinaryField512x1b>());
-
-		assert!(!is_sequential_bytes::<PackedBinaryField4x1b>());
-		assert!(!is_sequential_bytes::<PackedBinaryField16x8b>());
-	}
 
 	fn fold_right_reference<P, PE>(
 		evals: &[P],
@@ -782,7 +690,9 @@ mod tests {
 		let evals = repeat_with(|| PackedBinaryField128x1b::random(&mut rng))
 			.take(1 << LOG_EVALS_SIZE)
 			.collect::<Vec<_>>();
-		let query = vec![PackedBinaryField512x1b::random(&mut rng)];
+		let query = repeat_with(|| PackedBinaryField64x8b::random(&mut rng))
+			.take(8)
+			.collect::<Vec<_>>();
 
 		for log_query_size in 0..10 {
 			check_fold_right(

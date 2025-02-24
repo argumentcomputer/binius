@@ -5,9 +5,9 @@ use std::{
 	ops::{Deref, DerefMut},
 };
 
-use binius_field::{ExtensionField, Field, PackedExtension, PackedField};
+use binius_field::{Field, PackedExtension, PackedField};
 use binius_math::{
-	CompositionPolyOS, MultilinearExtension, MultilinearPoly, MultilinearQuery, MultilinearQueryRef,
+	CompositionPoly, MultilinearExtension, MultilinearPoly, MultilinearQuery, MultilinearQueryRef,
 };
 use binius_maybe_rayon::iter::FromParallelIterator;
 use tracing::instrument;
@@ -42,28 +42,8 @@ pub trait ComputationBackend: Send + Sync + Debug {
 		query: &[P::Scalar],
 	) -> Result<Self::Vec<P>, Error>;
 
-	/// Calculate the accumulated evaluations for the first round of zerocheck.
-	fn sumcheck_compute_first_round_evals<FDomain, FBase, F, P, M, Evaluator, Composition>(
-		&self,
-		n_vars: usize,
-		multilinears: &[SumcheckMultilinear<P, M>],
-		evaluators: &[Evaluator],
-		evaluation_points: &[FDomain],
-	) -> Result<Vec<RoundEvals<P::Scalar>>, Error>
-	where
-		FDomain: Field,
-		FBase: ExtensionField<FDomain>,
-		F: Field + ExtensionField<FDomain> + ExtensionField<FBase>,
-		P: PackedField<Scalar = F>
-			+ PackedExtension<F>
-			+ PackedExtension<FDomain>
-			+ PackedExtension<FBase>,
-		M: MultilinearPoly<P> + Send + Sync,
-		Evaluator: SumcheckEvaluator<FBase, P, Composition> + Sync,
-		Composition: CompositionPolyOS<P>;
-
 	/// Calculate the accumulated evaluations for an arbitrary round of zerocheck.
-	fn sumcheck_compute_later_round_evals<FDomain, F, P, M, Evaluator, Composition>(
+	fn sumcheck_compute_round_evals<FDomain, P, M, Evaluator, Composition>(
 		&self,
 		n_vars: usize,
 		tensor_query: Option<MultilinearQueryRef<P>>,
@@ -73,13 +53,10 @@ pub trait ComputationBackend: Send + Sync + Debug {
 	) -> Result<Vec<RoundEvals<P::Scalar>>, Error>
 	where
 		FDomain: Field,
-		F: Field + ExtensionField<FDomain>,
-		P: PackedField<Scalar = F>
-			+ PackedExtension<F, PackedSubfield = P>
-			+ PackedExtension<FDomain>,
+		P: PackedExtension<FDomain>,
 		M: MultilinearPoly<P> + Send + Sync,
-		Evaluator: SumcheckEvaluator<F, P, Composition> + Sync,
-		Composition: CompositionPolyOS<P>;
+		Evaluator: SumcheckEvaluator<P, Composition> + Sync,
+		Composition: CompositionPoly<P>;
 
 	/// Partially evaluate the polynomial with assignment to the high-indexed variables.
 	fn evaluate_partial_high<P: PackedField>(
@@ -108,35 +85,7 @@ where
 		T::tensor_product_full_query(self, query)
 	}
 
-	fn sumcheck_compute_first_round_evals<FDomain, FBase, F, P, M, Evaluator, Composition>(
-		&self,
-		n_vars: usize,
-		multilinears: &[SumcheckMultilinear<P, M>],
-		evaluators: &[Evaluator],
-		evaluation_points: &[FDomain],
-	) -> Result<Vec<RoundEvals<P::Scalar>>, Error>
-	where
-		FDomain: Field,
-		FBase: ExtensionField<FDomain>,
-		F: Field + ExtensionField<FDomain> + ExtensionField<FBase>,
-		P: PackedField<Scalar = F>
-			+ PackedExtension<F>
-			+ PackedExtension<FDomain>
-			+ PackedExtension<FBase>,
-		M: MultilinearPoly<P> + Send + Sync,
-		Evaluator: SumcheckEvaluator<FBase, P, Composition> + Sync,
-		Composition: CompositionPolyOS<P>,
-	{
-		T::sumcheck_compute_first_round_evals::<_, FBase, _, _, _, _, _>(
-			self,
-			n_vars,
-			multilinears,
-			evaluators,
-			evaluation_points,
-		)
-	}
-
-	fn sumcheck_compute_later_round_evals<FDomain, F, P, M, Evaluator, Composition>(
+	fn sumcheck_compute_round_evals<FDomain, P, M, Evaluator, Composition>(
 		&self,
 		n_vars: usize,
 		tensor_query: Option<MultilinearQueryRef<P>>,
@@ -146,15 +95,12 @@ where
 	) -> Result<Vec<RoundEvals<P::Scalar>>, Error>
 	where
 		FDomain: Field,
-		F: Field + ExtensionField<FDomain>,
-		P: PackedField<Scalar = F>
-			+ PackedExtension<F, PackedSubfield = P>
-			+ PackedExtension<FDomain>,
+		P: PackedExtension<FDomain>,
 		M: MultilinearPoly<P> + Send + Sync,
-		Evaluator: SumcheckEvaluator<F, P, Composition> + Sync,
-		Composition: CompositionPolyOS<P>,
+		Evaluator: SumcheckEvaluator<P, Composition> + Sync,
+		Composition: CompositionPoly<P>,
 	{
-		T::sumcheck_compute_later_round_evals(
+		T::sumcheck_compute_round_evals(
 			self,
 			n_vars,
 			tensor_query,

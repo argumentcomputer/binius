@@ -37,6 +37,18 @@ where
 
 		(c, d)
 	}
+
+	/// Transpose with the given bit size
+	fn transpose(mut self, mut other: Self, log_block_len: usize) -> (Self, Self) {
+		// There are 2^7 = 128 bits in a u128
+		assert!(log_block_len < Self::INTERLEAVE_EVEN_MASK.len());
+
+		for log_block_len in (log_block_len..Self::LOG_BITS).rev() {
+			(self, other) = self.interleave(other, log_block_len);
+		}
+
+		(self, other)
+	}
 }
 
 /// Abstraction for a packed tower field of height greater than 0.
@@ -331,7 +343,7 @@ where
 	OP: PackedBinaryField,
 {
 	pub fn new<Data: Deref<Target = [OP::Scalar]> + Sync>(
-		transformation: FieldLinearTransformation<OP::Scalar, Data>,
+		transformation: &FieldLinearTransformation<OP::Scalar, Data>,
 	) -> Self {
 		Self {
 			bases: transformation
@@ -387,7 +399,7 @@ where
 	fn make_packed_transformation<Data: Deref<Target = [OP::Scalar]> + Sync>(
 		transformation: FieldLinearTransformation<OP::Scalar, Data>,
 	) -> Self::PackedTransformation<Data> {
-		PackedTransformation::new(transformation)
+		PackedTransformation::new(&transformation)
 	}
 }
 
