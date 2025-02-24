@@ -141,6 +141,10 @@ path = "acc-step-up.rs"
 name = "acc-tower-basis"
 path = "acc-tower-basis.rs"
 
+[[example]]
+name = "acc-permutation-channels"
+path = "acc-permutation-channels.rs"
+
 [lints.clippy]
 needless_range_loop = "allow"
 
