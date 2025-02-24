@@ -20,7 +20,7 @@ const LOG_SIZE: usize = 3;
 //
 fn main() {
 	let allocator = bumpalo::Bump::new();
-  
+
 	let mut builder = ConstraintSystemBuilder::new_with_witness(&allocator);
 
 	// A truth table [000, 001, 010, 011 ... 111] where each row is in reversed order
