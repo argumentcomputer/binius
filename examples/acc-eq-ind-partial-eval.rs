@@ -2,9 +2,8 @@ use binius_circuits::builder::ConstraintSystemBuilder;
 use binius_core::{
 	constraint_system::validate::validate_witness, transparent::eq_ind::EqIndPartialEval,
 };
-use binius_field::{arch::OptimalUnderlier, BinaryField128b, PackedField};
+use binius_field::{BinaryField128b, PackedField};
 
-type U = OptimalUnderlier;
 type F128 = BinaryField128b;
 
 const LOG_SIZE: usize = 3;
@@ -21,7 +20,7 @@ const LOG_SIZE: usize = 3;
 //
 fn main() {
 	let allocator = bumpalo::Bump::new();
-	let mut builder = ConstraintSystemBuilder::<U, F128>::new_with_witness(&allocator);
+	let mut builder = ConstraintSystemBuilder::new_with_witness(&allocator);
 
 	// A truth table [000, 001, 010, 011 ... 111] where each row is in reversed order
 	let rev_basis = [

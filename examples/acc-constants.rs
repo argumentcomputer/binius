@@ -3,10 +3,8 @@ use binius_core::{
 	constraint_system::validate::validate_witness, oracle::OracleId,
 	transparent::constant::Constant,
 };
-use binius_field::{arch::OptimalUnderlier, BinaryField128b, BinaryField1b, BinaryField32b};
+use binius_field::{BinaryField1b, BinaryField32b};
 
-type U = OptimalUnderlier;
-type F128 = BinaryField128b;
 type F32 = BinaryField32b;
 type F1 = BinaryField1b;
 
@@ -17,7 +15,7 @@ const LOG_SIZE: usize = 4;
 fn constants_gadget(
 	name: impl ToString,
 	log_size: usize,
-	builder: &mut ConstraintSystemBuilder<U, F128>,
+	builder: &mut ConstraintSystemBuilder,
 	constant_value: u32,
 ) -> OracleId {
 	builder.push_namespace(name);
@@ -45,7 +43,7 @@ fn constants_gadget(
 // Transparent column.
 fn main() {
 	let allocator = bumpalo::Bump::new();
-	let mut builder = ConstraintSystemBuilder::<U, F128>::new_with_witness(&allocator);
+	let mut builder = ConstraintSystemBuilder::new_with_witness(&allocator);
 
 	pub const SHA256_INIT: [u32; 8] = [
 		0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
