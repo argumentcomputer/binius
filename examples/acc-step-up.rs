@@ -1,9 +1,7 @@
 use binius_circuits::builder::ConstraintSystemBuilder;
 use binius_core::{constraint_system::validate::validate_witness, transparent::step_up::StepUp};
-use binius_field::{arch::OptimalUnderlier, BinaryField128b, BinaryField8b};
+use binius_field::BinaryField8b;
 
-type U = OptimalUnderlier;
-type F128 = BinaryField128b;
 type F8 = BinaryField8b;
 
 const LOG_SIZE: usize = 8;
@@ -11,7 +9,7 @@ const LOG_SIZE: usize = 8;
 // StepUp expects all bytes to be unset before particular index specified as input (opposite to StepDown)
 fn main() {
 	let allocator = bumpalo::Bump::new();
-	let mut builder = ConstraintSystemBuilder::<U, F128>::new_with_witness(&allocator);
+	let mut builder = ConstraintSystemBuilder::new_with_witness(&allocator);
 
 	let index = 10;
 

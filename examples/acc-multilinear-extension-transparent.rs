@@ -14,7 +14,7 @@ type F128 = BinaryField128b;
 type F1 = BinaryField1b;
 
 // From a perspective of circuits creation, MultilinearExtensionTransparent can be used naturally for decomposing integers to bits
-fn decompose_transparent_u64(builder: &mut ConstraintSystemBuilder<U, F128>, x: u64) {
+fn decompose_transparent_u64(builder: &mut ConstraintSystemBuilder, x: u64) {
 	builder.push_namespace("decompose_transparent_u64");
 
 	let log_bits = log2_ceil_usize(64);
@@ -42,7 +42,7 @@ fn decompose_transparent_u64(builder: &mut ConstraintSystemBuilder<U, F128>, x: 
 	builder.pop_namespace();
 }
 
-fn decompose_transparent_u32(builder: &mut ConstraintSystemBuilder<U, F128>, x: u32) {
+fn decompose_transparent_u32(builder: &mut ConstraintSystemBuilder, x: u32) {
 	builder.push_namespace("decompose_transparent_u32");
 
 	let log_bits = log2_ceil_usize(32);
@@ -72,7 +72,7 @@ fn decompose_transparent_u32(builder: &mut ConstraintSystemBuilder<U, F128>, x: 
 
 fn main() {
 	let allocator = bumpalo::Bump::new();
-	let mut builder = ConstraintSystemBuilder::<U, F128>::new_with_witness(&allocator);
+	let mut builder = ConstraintSystemBuilder::new_with_witness(&allocator);
 
 	decompose_transparent_u64(&mut builder, 0xff00ff00ff00ff00);
 	decompose_transparent_u32(&mut builder, 0x00ff00ff);

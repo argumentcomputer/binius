@@ -142,7 +142,6 @@ where
 			.collect();
 
 		let nontrivial_evaluation_points = get_nontrivial_evaluation_points(&domains)?;
-
 		let state = ProverState::new(
 			evaluation_order,
 			multilinears,

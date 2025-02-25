@@ -1,12 +1,7 @@
 use binius_circuits::{builder::ConstraintSystemBuilder, unconstrained::unconstrained};
 use binius_core::constraint_system::validate::validate_witness;
-use binius_field::{
-	arch::OptimalUnderlier, BinaryField128b, BinaryField16b, BinaryField1b, BinaryField32b,
-	BinaryField8b, TowerField,
-};
+use binius_field::{BinaryField16b, BinaryField1b, BinaryField32b, BinaryField8b, TowerField};
 
-type U = OptimalUnderlier;
-type F128 = BinaryField128b;
 type F32 = BinaryField32b;
 type F16 = BinaryField16b;
 type F8 = BinaryField8b;
@@ -14,10 +9,10 @@ type F1 = BinaryField1b;
 
 // FIXME: Following gadgets are unconstrained. Only for demonstrative purpose, don't use in production
 
-fn packing_32_bits_to_u32(builder: &mut ConstraintSystemBuilder<U, F128>) {
+fn packing_32_bits_to_u32(builder: &mut ConstraintSystemBuilder) {
 	builder.push_namespace("packing_32_bits_to_u32");
 
-	let bits = unconstrained::<U, F128, F1>(builder, "bits", F32::TOWER_LEVEL).unwrap();
+	let bits = unconstrained::<F1>(builder, "bits", F32::TOWER_LEVEL).unwrap();
 	let packed = builder
 		.add_packed("packed", bits, F32::TOWER_LEVEL)
 		.unwrap();
@@ -49,10 +44,10 @@ fn packing_32_bits_to_u32(builder: &mut ConstraintSystemBuilder<U, F128>) {
 	builder.pop_namespace();
 }
 
-fn packing_4_bytes_to_u32(builder: &mut ConstraintSystemBuilder<U, F128>) {
+fn packing_4_bytes_to_u32(builder: &mut ConstraintSystemBuilder) {
 	builder.push_namespace("packing_4_bytes_to_u32");
 
-	let bytes = unconstrained::<U, F128, F8>(builder, "bytes", F16::TOWER_LEVEL).unwrap();
+	let bytes = unconstrained::<F8>(builder, "bytes", F16::TOWER_LEVEL).unwrap();
 	let packed = builder
 		.add_packed("packed", bytes, F16::TOWER_LEVEL)
 		.unwrap();
@@ -76,10 +71,10 @@ fn packing_4_bytes_to_u32(builder: &mut ConstraintSystemBuilder<U, F128>) {
 	builder.pop_namespace();
 }
 
-fn packing_8_bits_to_u8(builder: &mut ConstraintSystemBuilder<U, F128>) {
+fn packing_8_bits_to_u8(builder: &mut ConstraintSystemBuilder) {
 	builder.push_namespace("packing_8_bits_to_u8");
 
-	let bits = unconstrained::<U, F128, F1>(builder, "bits", F8::TOWER_LEVEL).unwrap();
+	let bits = unconstrained::<F1>(builder, "bits", F8::TOWER_LEVEL).unwrap();
 	let packed = builder.add_packed("packed", bits, F8::TOWER_LEVEL).unwrap();
 
 	if let Some(witness) = builder.witness() {
@@ -94,7 +89,7 @@ fn packing_8_bits_to_u8(builder: &mut ConstraintSystemBuilder<U, F128>) {
 fn main() {
 	let allocator = bumpalo::Bump::new();
 
-	let mut builder = ConstraintSystemBuilder::<U, F128>::new_with_witness(&allocator);
+	let mut builder = ConstraintSystemBuilder::new_with_witness(&allocator);
 
 	packing_32_bits_to_u32(&mut builder);
 	packing_4_bytes_to_u32(&mut builder);
