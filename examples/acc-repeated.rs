@@ -1,12 +1,9 @@
 use binius_circuits::{builder::ConstraintSystemBuilder, unconstrained::unconstrained};
 use binius_core::constraint_system::validate::validate_witness;
 use binius_field::{
-	arch::OptimalUnderlier, packed::set_packed_slice, BinaryField128b, BinaryField1b,
-	BinaryField8b, PackedBinaryField128x1b,
+	packed::set_packed_slice, BinaryField1b, BinaryField8b, PackedBinaryField128x1b,
 };
 
-type U = OptimalUnderlier;
-type F128 = BinaryField128b;
 type F8 = BinaryField8b;
 type F1 = BinaryField1b;
 
@@ -18,10 +15,10 @@ const LOG_SIZE: usize = 8;
 // so new column is X times bigger than original one. The following gadget operates over bytes, e.g.
 // it creates column with some input bytes written and then creates one more 'Repeated' column
 // where the same bytes are copied multiple times.
-fn bytes_repeat_gadget(builder: &mut ConstraintSystemBuilder<U, F128>) {
+fn bytes_repeat_gadget(builder: &mut ConstraintSystemBuilder) {
 	builder.push_namespace("bytes_repeat_gadget");
 
-	let bytes = unconstrained::<U, F128, F8>(builder, "input", LOG_SIZE).unwrap();
+	let bytes = unconstrained::<F8>(builder, "input", LOG_SIZE).unwrap();
 
 	let repeat_times_log = 4usize;
 	let repeating = builder
@@ -57,10 +54,10 @@ fn bytes_repeat_gadget(builder: &mut ConstraintSystemBuilder<U, F128>) {
 // repetitions Binius creates column with 8 PackedBinaryField128x1b elements totally.
 // Proper writing bits requires separate iterating over PackedBinaryField128x1b elements and input bytes
 // with extracting particular bit values from the input and setting appropriate bit in a given PackedBinaryField128x1b.
-fn bits_repeat_gadget(builder: &mut ConstraintSystemBuilder<U, F128>) {
+fn bits_repeat_gadget(builder: &mut ConstraintSystemBuilder) {
 	builder.push_namespace("bits_repeat_gadget");
 
-	let bits = unconstrained::<U, F128, F1>(builder, "input", LOG_SIZE).unwrap();
+	let bits = unconstrained::<F1>(builder, "input", LOG_SIZE).unwrap();
 	let repeat_times_log = 2usize;
 
 	// Binius will create column with appropriate height for us
@@ -112,7 +109,7 @@ fn bits_repeat_gadget(builder: &mut ConstraintSystemBuilder<U, F128>) {
 fn main() {
 	let allocator = bumpalo::Bump::new();
 
-	let mut builder = ConstraintSystemBuilder::<U, F128>::new_with_witness(&allocator);
+	let mut builder = ConstraintSystemBuilder::new_with_witness(&allocator);
 
 	bytes_repeat_gadget(&mut builder);
 	bits_repeat_gadget(&mut builder);

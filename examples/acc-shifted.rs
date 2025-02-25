@@ -1,21 +1,19 @@
 use binius_circuits::{builder::ConstraintSystemBuilder, unconstrained::unconstrained};
 use binius_core::{constraint_system::validate::validate_witness, oracle::ShiftVariant};
-use binius_field::{arch::OptimalUnderlier, BinaryField128b, BinaryField1b};
+use binius_field::BinaryField1b;
 
-type U = OptimalUnderlier;
-type F128 = BinaryField128b;
 type F1 = BinaryField1b;
 
 // FIXME: Following gadgets are unconstrained. Only for demonstrative purpose, don't use in production
 
-fn shift_right_gadget_u32(builder: &mut ConstraintSystemBuilder<U, F128>) {
+fn shift_right_gadget_u32(builder: &mut ConstraintSystemBuilder) {
 	builder.push_namespace("u32_right_shift");
 
 	// defined empirically and it is the same as 'block_bits' defined below
 	let log_size = 5usize;
 
 	// create column and write arbitrary bytes to it
-	let input = unconstrained::<U, F128, F1>(builder, "input", log_size).unwrap();
+	let input = unconstrained::<F1>(builder, "input", log_size).unwrap();
 
 	// we want to shift our u32 variable on 1 bit
 	let shift_offset = 1;
@@ -43,11 +41,11 @@ fn shift_right_gadget_u32(builder: &mut ConstraintSystemBuilder<U, F128>) {
 	builder.pop_namespace();
 }
 
-fn shift_left_gadget_u8(builder: &mut ConstraintSystemBuilder<U, F128>) {
+fn shift_left_gadget_u8(builder: &mut ConstraintSystemBuilder) {
 	builder.push_namespace("u8_left_shift");
 	let log_size = 3usize;
 
-	let input = unconstrained::<U, F128, F1>(builder, "input", log_size).unwrap();
+	let input = unconstrained::<F1>(builder, "input", log_size).unwrap();
 	let shift_offset = 4;
 	let shift_type = ShiftVariant::LogicalLeft;
 	let block_bits = 3;
@@ -67,11 +65,11 @@ fn shift_left_gadget_u8(builder: &mut ConstraintSystemBuilder<U, F128>) {
 	builder.pop_namespace();
 }
 
-fn rotate_left_gadget_u16(builder: &mut ConstraintSystemBuilder<U, F128>) {
+fn rotate_left_gadget_u16(builder: &mut ConstraintSystemBuilder) {
 	builder.push_namespace("u16_rotate_right");
 	let log_size = 4usize;
 
-	let input = unconstrained::<U, F128, F1>(builder, "input", log_size).unwrap();
+	let input = unconstrained::<F1>(builder, "input", log_size).unwrap();
 	let rotation_offset = 5;
 	let rotation_type = ShiftVariant::CircularLeft;
 	let block_bits = 4usize;
@@ -92,11 +90,11 @@ fn rotate_left_gadget_u16(builder: &mut ConstraintSystemBuilder<U, F128>) {
 	builder.pop_namespace();
 }
 
-fn rotate_right_gadget_u64(builder: &mut ConstraintSystemBuilder<U, F128>) {
+fn rotate_right_gadget_u64(builder: &mut ConstraintSystemBuilder) {
 	builder.push_namespace("u64_rotate_right");
 	let log_size = 6usize;
 
-	let input = unconstrained::<U, F128, F1>(builder, "input", log_size).unwrap();
+	let input = unconstrained::<F1>(builder, "input", log_size).unwrap();
 
 	// Right rotation to X bits is achieved using 'ShiftVariant::CircularLeft' with the offset,
 	// computed as size in bits of the variable type - X (e.g. if we want to right-rotate u64 to 8 bits,
@@ -124,7 +122,7 @@ fn rotate_right_gadget_u64(builder: &mut ConstraintSystemBuilder<U, F128>) {
 fn main() {
 	let allocator = bumpalo::Bump::new();
 
-	let mut builder = ConstraintSystemBuilder::<U, F128>::new_with_witness(&allocator);
+	let mut builder = ConstraintSystemBuilder::new_with_witness(&allocator);
 
 	shift_right_gadget_u32(&mut builder);
 	shift_left_gadget_u8(&mut builder);

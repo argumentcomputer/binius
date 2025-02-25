@@ -1,12 +1,7 @@
 use binius_circuits::builder::ConstraintSystemBuilder;
 use binius_core::constraint_system::validate::validate_witness;
-use binius_field::{
-	arch::OptimalUnderlier, BinaryField, BinaryField128b, BinaryField16b, BinaryField32b,
-	PackedField,
-};
+use binius_field::{BinaryField, BinaryField16b, BinaryField32b, PackedField};
 
-type U = OptimalUnderlier;
-type F128 = BinaryField128b;
 type F32 = BinaryField32b;
 type F16 = BinaryField16b;
 
@@ -22,7 +17,7 @@ const LOG_SIZE: usize = 3;
 
 // where 'x' is a multiplicative generator - a public value that exists for every BinaryField
 //
-fn powers_gadget_f32(builder: &mut ConstraintSystemBuilder<U, F128>, name: impl ToString) {
+fn powers_gadget_f32(builder: &mut ConstraintSystemBuilder, name: impl ToString) {
 	builder.push_namespace(name);
 
 	let generator = F32::MULTIPLICATIVE_GENERATOR;
@@ -43,7 +38,7 @@ fn powers_gadget_f32(builder: &mut ConstraintSystemBuilder<U, F128>, name: impl 
 }
 
 // Only Field is being changed
-fn powers_gadget_f16(builder: &mut ConstraintSystemBuilder<U, F128>, name: impl ToString) {
+fn powers_gadget_f16(builder: &mut ConstraintSystemBuilder, name: impl ToString) {
 	builder.push_namespace(name);
 
 	let generator = F16::MULTIPLICATIVE_GENERATOR;
@@ -65,7 +60,7 @@ fn powers_gadget_f16(builder: &mut ConstraintSystemBuilder<U, F128>, name: impl 
 
 fn main() {
 	let allocator = bumpalo::Bump::new();
-	let mut builder = ConstraintSystemBuilder::<U, F128>::new_with_witness(&allocator);
+	let mut builder = ConstraintSystemBuilder::new_with_witness(&allocator);
 
 	powers_gadget_f16(&mut builder, "f16");
 	powers_gadget_f32(&mut builder, "f32");

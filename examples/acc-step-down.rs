@@ -2,18 +2,16 @@ use binius_circuits::builder::ConstraintSystemBuilder;
 use binius_core::{
 	constraint_system::validate::validate_witness, transparent::step_down::StepDown,
 };
-use binius_field::{arch::OptimalUnderlier, BinaryField128b, BinaryField8b};
+use binius_field::BinaryField8b;
 
 const LOG_SIZE: usize = 8;
 
-type U = OptimalUnderlier;
-type F128 = BinaryField128b;
 type F8 = BinaryField8b;
 
 // StepDown expects all bytes to be set before particular index specified as input
 fn main() {
 	let allocator = bumpalo::Bump::new();
-	let mut builder = ConstraintSystemBuilder::<U, F128>::new_with_witness(&allocator);
+	let mut builder = ConstraintSystemBuilder::new_with_witness(&allocator);
 
 	let index = 10;
 

@@ -3,16 +3,15 @@ use binius_core::{
 	constraint_system::validate::validate_witness, oracle::ShiftVariant,
 	transparent::shift_ind::ShiftIndPartialEval,
 };
-use binius_field::{arch::OptimalUnderlier, util::eq, BinaryField128b, Field};
+use binius_field::{util::eq, BinaryField128b, Field};
 
-type U = OptimalUnderlier;
 type F128 = BinaryField128b;
 
 // ShiftIndPartialEval is a more elaborated version of EqIndPartialEval. Same idea with challenges, but a bit more
 // elaborated evaluation algorithm is used
 fn main() {
 	let allocator = bumpalo::Bump::new();
-	let mut builder = ConstraintSystemBuilder::<U, F128>::new_with_witness(&allocator);
+	let mut builder = ConstraintSystemBuilder::new_with_witness(&allocator);
 
 	let block_size = 3;
 	let shift_offset = 4;
