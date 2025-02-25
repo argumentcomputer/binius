@@ -3,12 +3,8 @@ use binius_core::{
 	constraint_system::validate::validate_witness,
 	transparent::{constant::Constant, disjoint_product::DisjointProduct, powers::Powers},
 };
-use binius_field::{
-	arch::OptimalUnderlier, BinaryField, BinaryField128b, BinaryField8b, PackedField,
-};
+use binius_field::{BinaryField, BinaryField8b, PackedField};
 
-type U = OptimalUnderlier;
-type F128 = BinaryField128b;
 type F8 = BinaryField8b;
 
 const LOG_SIZE: usize = 4;
@@ -29,7 +25,7 @@ const LOG_SIZE: usize = 4;
 // of heights (n_vars) of Powers and Constant, so actual data could be repeated multiple times
 fn main() {
 	let allocator = bumpalo::Bump::new();
-	let mut builder = ConstraintSystemBuilder::<U, F128>::new_with_witness(&allocator);
+	let mut builder = ConstraintSystemBuilder::new_with_witness(&allocator);
 
 	let generator = F8::MULTIPLICATIVE_GENERATOR;
 	let powers = Powers::new(LOG_SIZE, generator.into());

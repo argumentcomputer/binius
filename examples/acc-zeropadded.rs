@@ -1,9 +1,7 @@
 use binius_circuits::{builder::ConstraintSystemBuilder, unconstrained::unconstrained};
 use binius_core::constraint_system::validate::validate_witness;
-use binius_field::{arch::OptimalUnderlier, BinaryField128b, BinaryField8b};
+use binius_field::BinaryField8b;
 
-type U = OptimalUnderlier;
-type F128 = BinaryField128b;
 type F8 = BinaryField8b;
 
 const LOG_SIZE: usize = 4;
@@ -11,9 +9,9 @@ const LOG_SIZE: usize = 4;
 fn main() {
 	let allocator = bumpalo::Bump::new();
 
-	let mut builder = ConstraintSystemBuilder::<U, F128>::new_with_witness(&allocator);
+	let mut builder = ConstraintSystemBuilder::new_with_witness(&allocator);
 
-	let bytes = unconstrained::<U, F128, F8>(&mut builder, "bytes", LOG_SIZE).unwrap();
+	let bytes = unconstrained::<F8>(&mut builder, "bytes", LOG_SIZE).unwrap();
 
 	// Height of ZeroPadded column can't be smaller than input one.
 	// If n_vars equals to LOG_SIZE, then no padding is required,

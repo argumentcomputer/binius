@@ -46,7 +46,11 @@ where
 
 impl<'a, F, FDomain, P, Composition, M, Backend> GPAProver<'a, FDomain, P, Composition, M, Backend>
 where
+<<<<<<< HEAD
 	F: TowerField + ExtensionField<FDomain>,
+=======
+	F: Field,
+>>>>>>> 082235c (example: Blake3 permutation using channels API (#10))
 	FDomain: Field,
 	P: PackedFieldIndexable<Scalar = F> + PackedExtension<FDomain>,
 	Composition: CompositionPoly<P>,
@@ -99,7 +103,14 @@ where
 			.map(|claim| claim.composition)
 			.collect();
 
+<<<<<<< HEAD
 		let nontrivial_evaluation_points = get_nontrivial_evaluation_points(&domains)?;
+=======
+		let evaluation_points = domains
+			.iter()
+			.max_by_key(|domain| domain.size())
+			.map_or_else(|| Vec::new(), |domain| domain.finite_points().to_vec());
+>>>>>>> 082235c (example: Blake3 permutation using channels API (#10))
 
 		let state = ProverState::new(
 			multilinears,

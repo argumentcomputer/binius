@@ -1,8 +1,7 @@
 use binius_circuits::{builder::ConstraintSystemBuilder, unconstrained::unconstrained};
 use binius_core::{constraint_system::validate::validate_witness, oracle::ProjectionVariant};
-use binius_field::{arch::OptimalUnderlier, BinaryField128b, BinaryField8b};
+use binius_field::{BinaryField128b, BinaryField8b};
 
-type U = OptimalUnderlier;
 type F128 = BinaryField128b;
 type F8 = BinaryField8b;
 
@@ -20,14 +19,13 @@ struct U8U128ProjectionInfo {
 // has significant impact on input data processing.
 // In the following example we have input column with bytes (u8) projected to the output column with u128 values.
 fn projection(
-	builder: &mut ConstraintSystemBuilder<U, F128>,
+	builder: &mut ConstraintSystemBuilder,
 	projection_info: U8U128ProjectionInfo,
 	namespace: &str,
 ) {
 	builder.push_namespace(format!("projection {}", namespace));
 
-	let input =
-		unconstrained::<U, F128, F8>(builder, "in", projection_info.clone().log_size).unwrap();
+	let input = unconstrained::<F8>(builder, "in", projection_info.clone().log_size).unwrap();
 
 	let projected = builder
 		.add_projected(
@@ -112,7 +110,7 @@ impl U8U128ProjectionInfo {
 
 fn main() {
 	let allocator = bumpalo::Bump::new();
-	let mut builder = ConstraintSystemBuilder::<U, F128>::new_with_witness(&allocator);
+	let mut builder = ConstraintSystemBuilder::new_with_witness(&allocator);
 
 	let projection_data = U8U128ProjectionInfo::new(
 		4usize,
