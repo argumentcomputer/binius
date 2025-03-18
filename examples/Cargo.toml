@@ -13,13 +13,13 @@ binius_core = { path = "../crates/core", default-features = false }
 binius_field = { path = "../crates/field", default-features = false }
 binius_hal = { path = "../crates/hal", default-features = false }
 binius_hash = { path = "../crates/hash", default-features = false }
-binius_m3 = { path = "../crates/m3", default-features = false }
 binius_macros = { path = "../crates/macros", default-features = false }
+binius_maybe_rayon = { path = "../crates/maybe_rayon", default-features = false }
 binius_math = { path = "../crates/math", default-features = false }
+binius_m3 = { path = "../crates/m3", default-features = false }
 binius_utils = { path = "../crates/utils", default-features = false }
 bytemuck.workspace = true
 bumpalo.workspace = true
-bytemuck.workspace = true
 bytesize.workspace = true
 clap = { version = "4.5.20", features = ["derive"] }
 itertools.workspace = true
@@ -162,6 +162,10 @@ path = "acc-tower-basis.rs"
 [[example]]
 name = "acc-permutation-channels"
 path = "acc-permutation-channels.rs"
+
+[[example]]
+name = "acc-ro-memory"
+path = "acc-ro-memory.rs"
 
 [lints.clippy]
 needless_range_loop = "allow"

@@ -7,7 +7,7 @@ use binius_field::{BinaryField1b, BinaryField32b};
 type F32 = BinaryField32b;
 type F1 = BinaryField1b;
 
-const LOG_SIZE: usize = 4;
+const LOG_SIZE: usize = 7;
 
 // FIXME: Following gadgets are unconstrained. Only for demonstrative purpose, don't use in production
 
