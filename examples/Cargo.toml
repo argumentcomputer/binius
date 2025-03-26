@@ -26,6 +26,7 @@ itertools.workspace = true
 rand.workspace = true
 tracing-profile.workspace = true
 tracing.workspace = true
+tiny-keccak = "2.0.2"
 
 [[example]]
 name = "keccakf_circuit"
@@ -166,6 +167,10 @@ path = "acc-permutation-channels.rs"
 [[example]]
 name = "acc-ro-memory"
 path = "acc-ro-memory.rs"
+
+[[example]]
+name = "acc-keccak-vm-memory"
+path = "acc-keccak-vm-memory.rs"
 
 [lints.clippy]
 needless_range_loop = "allow"
