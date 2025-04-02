@@ -1,3 +1,37 @@
+/// This is an implementation of the memory' integrity check (using Binius) - a typical task in the domain of the zkVMs.
+/// Programs that need to be proven can be viewed as a memory consisted from set of terms
+/// (Lean terms) serialized with some format (iXon) and written to some (content-addressable) storage. The integrity property of
+/// such memories is usually achieved by including cryptographic hashes of the serialized terms. In this example, we
+/// consider some abstract program / memory represented as `N` randomly generated "senseless" terms prepended with Keccak256 hashes
+/// (computed out of the circuit) of these terms: [ hash_0 | hash_1 | ... | hash_N | preimage_0 | preimage_1 | ... | preimage_N ].
+///
+/// At a high level, the proving claim of the integrity check circuit / chip can be expressed as following:
+///
+/// 1) Every byte in the memory (either some preimage' or some hash' byte) has its position, defined by unique 32-bit pointer,
+/// starting from Binius' F32::ONE. Every consequent address is computed by: `next_addr = prev_addr * F32::MULTIPLICATIVE_GENERATOR`.
+///
+/// 2) Every i-th preimage corresponds to its i-th Keccak256 hash: `hash_i = Keccak256(preimage_i)`, which is implemented as a computing
+/// actual Keccak256 hash of the given preimage and comparing it with the expected one (for each preimage / hash tuple).
+///
+/// Preimages may have different byte sizes. The Keccak256 hash function operates by iterative applying its core transformation which operates
+/// over fixed-size inputs and outputs - 25 64-bit words state. If preimage size is smaller or equal to the size of the state, then ultimate value
+/// of hash is output of exactly one core transformation output. Otherwise, preimage is divided into chunks and by applying core transformation
+/// to each chunk iteratively, the overall hash function state is updated. If final preimage's chunk is smaller than state size, it is padded to the
+/// size of the Keccak state.
+///
+/// Considering hash functions specifics mentioned above, there are two additional notions, important for understanding circuit implementation:
+/// `Trace` and `MemorySliceInfo`. Every particular `Trace` contains information about Keccak state before and after applying exactly one core transformation
+/// (and, hence, updating its state). Every particular `MemorySliceInfo` contains information about particular preimage pointer, its length and correspondent
+/// hash pointer - in order to identify one particular i-th preimage / hash tuple in the overall memory. In the given example, `Trace` can be either "base" one -
+/// meaning that it carries value of Keccak state used as ultimate hash value - or it can be "extra" one - meaning that it carries intermediate values of the Keccak
+/// state, and there is a "base" `Trace` in the end of the chain that expresses overall processing which happens during hash value computation.
+///
+/// Given hash functions specifics and notions of `Trace` and `MemorySliceInfo`, one can extend second part of the high-level claim (defined above) to the following:
+/// - Every preimage / hash tuple has exactly one `MemorySliceInfo` and could have one ("base") or more ("extra", "extra" ,  ..., "base" ) `Traces`, depending
+/// on size of the preimage. There is a direct correlation between one `MemorySliceInfo` and one or more `Traces` for the particular preimage / hash tuple which is enforced.
+/// - Every preimage has been consistently padded when necessary (this is obviously applied only for "base" `Traces`).
+/// - Every state transition has been performed correctly (given arbitrary `Trace`, either "base" or "extra", this means that applying one core keccak transformation to the
+/// pre-state matches gives expected post-state).
 use std::{
 	array,
 	iter::{repeat_n, successors},
@@ -46,7 +80,15 @@ type F32 = BinaryField32b;
 type F8 = BinaryField8b;
 type F1 = BinaryField1b;
 
-/// Read-only memory gadget
+/// Read-only memory gadget.
+///
+/// The prover instantiates it using some abstract memory represented as a vector of bytes (gadget automatically
+/// allocates addresses for each memory byte), then writes overall memory data into the witness and
+/// finally checks mapping between given byte and address via lasso lookup constraining.
+///
+/// The verifier can instantiate it using only length of the memory that is expected. Using own instance of constraint
+/// system builder, verifier constraints memory (via lasso lookup) to preserve byte <-> address mapping
+///
 #[derive(Clone, Debug)]
 pub struct MemoryGadget {
 	pub mem: Either<usize, (Vec<u8>, Vec<F32>)>,
@@ -63,6 +105,7 @@ pub struct RomOracle {
 }
 
 impl MemoryGadget {
+	// Instantiates new instance of the MemoryGadget using either memory value (for prover) or just size of expected memory (for verifier)
 	pub fn new(builder: &mut ConstraintSystemBuilder, mem: Either<usize, Vec<u8>>) -> Self {
 		let channel = builder.add_channel();
 		let mem = mem.map_right(|mem| {
@@ -118,6 +161,7 @@ impl MemoryGadget {
 		mem.resize(new_len, 0);
 	}
 
+	// Allows computing expected value of address (represented as F32) for byte at a given position
 	pub fn mult_address(&self, address: usize) -> Option<F32> {
 		self.mem.as_ref().either(
 			|&size| {
@@ -127,6 +171,7 @@ impl MemoryGadget {
 		)
 	}
 
+	// Put information about particular byte in memory into a lookup to expect it to have specific address (for both prover / verifier)
 	pub fn read_byte_oracle(
 		&mut self,
 		builder: &mut ConstraintSystemBuilder,
@@ -164,6 +209,7 @@ impl MemoryGadget {
 		})
 	}
 
+	// Write actual value of memory' byte into witness (only for prover)
 	pub fn read_byte_witness<Row>(
 		&mut self,
 		builder: &mut ConstraintSystemBuilder,
@@ -217,8 +263,7 @@ impl MemoryGadget {
 		Ok(())
 	}
 
-	// Given memory written into a witness, this function finalizes constructing input for lasso lookup
-	// and executes lasso
+	// This function finalizes constructing input for lasso lookup and executes lasso (for both prover and verifier)
 	pub fn run_lookup(&mut self, builder: &mut ConstraintSystemBuilder) -> anyhow::Result<usize> {
 		let size = self.mem.as_ref().either(|&size| size, |(mem, _)| mem.len());
 		let n_vars = log2_ceil_usize(size);
@@ -294,6 +339,24 @@ const HASHES_NUM: usize = PREIMAGES_NUM;
 const PREIMAGE_SIZE: usize = 1000;
 const HASH_SIZE: usize = 32;
 
+pub struct BaseTraceOracles {
+	pre_hash_state: [OracleId; KECCAK_STATE_BYTE_SIZE],
+	preimage_offset: OracleId,
+	preimage_length: OracleId,
+	hash_offset: OracleId,
+	single_preimage_absorb: [OracleId; SINGLE_PREIMAGE_ABSORB_BYTE_SIZE],
+	post_hash_state: [OracleId; KECCAK_STATE_BYTE_SIZE],
+}
+
+pub struct ExtraTraceOracles {
+	pre_hash_state: [OracleId; KECCAK_STATE_BYTE_SIZE],
+	preimage_offset: OracleId,
+	preimage_length: OracleId,
+	hash_offset: OracleId,
+	single_preimage_absorb: [OracleId; SINGLE_PREIMAGE_ABSORB_BYTE_SIZE],
+	post_hash_state: [OracleId; KECCAK_STATE_BYTE_SIZE],
+}
+
 fn main() {
 	// prepare random memory
 	let mut rng = OsRng;
@@ -330,12 +393,12 @@ fn main() {
 	let mut hash_offset = 0usize;
 	let mut preimage_offset = HASH_SIZE * HASHES_NUM;
 
-	// Write memory data into IntegrityCheck Gadget. This is a stage of creating traces
+	// Load memory data into IntegrityCheck Gadget. This is a stage of creating traces
 	for _ in 0..HASHES_NUM {
 		integrity_check_gadget
 			.absorb_single_memory_chunk(
 				&mut memory_prover,
-				// for each chunk (preimage / hash) prover also submits offsets in memory for preimage / hash (and size of preimage)
+				// for each (preimage / hash) tuple prover also submits offsets in memory for preimage / hash (and size of preimage)
 				MemorySliceInfo {
 					preimage_offset,
 					preimage_length: PREIMAGE_SIZE,
@@ -348,23 +411,10 @@ fn main() {
 		hash_offset += HASH_SIZE;
 	}
 
-
 	// The first part of the claim is proving the mapping between memory bytes and allocated addresses
-	let (
-		padded_memory_size,
-		pre_hash_state_oracles,
-		preimage_offset_oracle,
-		preimage_len_oracle,
-		hash_offset_oracle,
-		single_preimage_absorb,
-		post_hash_state_oracles,
-		pre_hash_state_extra_oracles,
-		preimage_offset_extra_oracle,
-		preimage_len_extra_oracle,
-		hash_offset_extra_oracle,
-		single_preimage_absorb_extra_oracles,
-		post_hash_state_extra_oracles,
-	) = integrity_check_gadget.memory_lookup_prover(&mut memory_prover, &mut builder_prover);
+
+	let (padded_memory_size, base_trace_oracles_p, extra_trace_oracles_p) =
+		integrity_check_gadget.memory_lookup_prover(&mut memory_prover, &mut builder_prover);
 
 	// The second part of the claim is enforcing that created traces are "synchronized" with the slices (information about preimage / hash offsets).
 	// Currently in this example, for simplicity, there are only so-called "base" trace and slices, but if size of preimage is too big
@@ -372,15 +422,8 @@ fn main() {
 	integrity_check_gadget.trace_slice_correlation_prover(
 		&mut memory_prover,
 		&mut builder_prover,
-		pre_hash_state_oracles,
-		preimage_offset_oracle,
-		preimage_len_oracle,
-		hash_offset_oracle,
-		pre_hash_state_extra_oracles,
-		post_hash_state_extra_oracles,
-		preimage_offset_extra_oracle,
-		preimage_len_extra_oracle,
-		hash_offset_extra_oracle,
+		&base_trace_oracles_p,
+		extra_trace_oracles_p.as_ref(),
 	);
 
 	// Third part of the claim is enforcing that padding has been correctly applied, and we will later hash in-circuit what is actually expected to be hashed
@@ -392,10 +435,8 @@ fn main() {
 		padded_absorbed_extra_oracles,
 	) = integrity_check_gadget.padding_consistency_prover(
 		&mut builder_prover,
-		pre_hash_state_oracles,
-		single_preimage_absorb,
-		pre_hash_state_extra_oracles,
-		single_preimage_absorb_extra_oracles,
+		&base_trace_oracles_p,
+		extra_trace_oracles_p.as_ref(),
 	);
 
 	// TODO: figure out this part of a claim in more details
@@ -404,18 +445,16 @@ fn main() {
 		&mut builder_prover,
 		padding_values_oracles,
 		packed_selector_u_oracles,
-		preimage_len_oracle,
+		base_trace_oracles_p.preimage_length,
 	);
 
 	// Final part of a claim is applying keccak core transformation to the preimages from the memory and compare the computed hash with expected one
 	integrity_check_gadget.keccak_state_transition_prover(
 		&mut builder_prover,
 		padded_absorbed_oracles,
-		pre_hash_state_oracles,
-		post_hash_state_oracles,
 		padded_absorbed_extra_oracles,
-		pre_hash_state_extra_oracles,
-		post_hash_state_extra_oracles,
+		&base_trace_oracles_p,
+		extra_trace_oracles_p.as_ref(),
 	);
 
 	let witness = builder_prover.take_witness().unwrap();
@@ -440,32 +479,13 @@ fn main() {
 	let mut memory_gadget =
 		MemoryGadget::new(&mut verifier_builder, Either::Left(padded_memory_size));
 
-	let (
-		pre_hash_state_oracles,
-		preimage_offset_oracle,
-		preimage_length_oracle,
-		hash_offset_oracle,
-		single_preimage_absorb_oracles,
-		post_hash_state_oracles,
-		pre_hash_state_extra_oracles,
-		preimage_offset_extra_oracle,
-		preimage_length_extra_oracle,
-		hash_offset_extra_oracle,
-		single_preimage_absorb_extra_oracles,
-		post_hash_state_extra_oracles,
-	) = integrity_check_gadget.memory_lookup_verifier(&mut memory_gadget, &mut verifier_builder);
+	let (base_trace_oracles_v, extra_trace_oracles_v) =
+		integrity_check_gadget.memory_lookup_verifier(&mut memory_gadget, &mut verifier_builder);
 
 	integrity_check_gadget.trace_slice_correlation_verifier(
 		&mut verifier_builder,
-		pre_hash_state_oracles,
-		preimage_offset_oracle,
-		preimage_length_oracle,
-		hash_offset_oracle,
-		pre_hash_state_extra_oracles,
-		post_hash_state_extra_oracles,
-		preimage_offset_extra_oracle,
-		preimage_length_extra_oracle,
-		hash_offset_extra_oracle,
+		&base_trace_oracles_v,
+		extra_trace_oracles_v.as_ref(),
 	);
 
 	let (
@@ -475,27 +495,23 @@ fn main() {
 		padded_absorbed_extra_oracles,
 	) = integrity_check_gadget.padding_consistency_verifier(
 		&mut verifier_builder,
-		pre_hash_state_oracles,
-		single_preimage_absorb_oracles,
-		pre_hash_state_extra_oracles,
-		single_preimage_absorb_extra_oracles,
+		&base_trace_oracles_v,
+		extra_trace_oracles_v.as_ref(),
 	);
 
 	integrity_check_gadget.padding_lookup_verifier(
 		&mut verifier_builder,
 		padding_values_oracles,
 		packed_selector_u_oracles,
-		preimage_len_oracle,
+		base_trace_oracles_v.preimage_length,
 	);
 
 	integrity_check_gadget.keccak_state_transition_verifier(
 		&mut verifier_builder,
 		padded_absorbed_oracles,
-		pre_hash_state_oracles,
-		post_hash_state_oracles,
 		padded_absorbed_extra_oracles,
-		pre_hash_state_extra_oracles,
-		post_hash_state_extra_oracles,
+		&base_trace_oracles_v,
+		extra_trace_oracles_v.as_ref(),
 	);
 
 	let cs = verifier_builder.build().unwrap();
@@ -528,6 +544,13 @@ pub struct TraceRow {
 	pub padded_absorbed: [u8; SINGLE_PREIMAGE_ABSORB_BYTE_SIZE],
 }
 
+/// IntegrityCheck Gadget based on Keccak256 hash function.
+///
+/// This is a gadget that implements proving claim for memory integrity checking.
+/// Prover needs to load memory data into the witness and then sequentially call API functions that enforce
+/// particular parts of the claim.
+///
+/// Verifier needs to submit only expected sizes of memory and traces and then also sequentially call API functions that enforce claim.
 #[derive(Debug, Clone)]
 pub struct IntegrityCheckGadget {
 	pub base_traces: Vec<TraceRow>,
@@ -553,6 +576,7 @@ impl IntegrityCheckGadget {
 	////// PROVER
 	////////////////////////////////////////////////////////////////////////////////////
 
+	// Loads memory data into the witness
 	pub fn absorb_single_memory_chunk(
 		&mut self,
 		memory: &mut MemoryGadget,
@@ -654,21 +678,7 @@ impl IntegrityCheckGadget {
 		&mut self,
 		memory_prover: &mut MemoryGadget,
 		builder_prover: &mut ConstraintSystemBuilder,
-	) -> (
-		usize,
-		[OracleId; KECCAK_STATE_BYTE_SIZE],
-		OracleId,
-		OracleId,
-		OracleId,
-		[OracleId; SINGLE_PREIMAGE_ABSORB_BYTE_SIZE],
-		[OracleId; KECCAK_STATE_BYTE_SIZE],
-		Option<[OracleId; KECCAK_STATE_BYTE_SIZE]>,
-		Option<OracleId>,
-		Option<OracleId>,
-		Option<OracleId>,
-		Option<[OracleId; SINGLE_PREIMAGE_ABSORB_BYTE_SIZE]>,
-		Option<[OracleId; KECCAK_STATE_BYTE_SIZE]>,
-	) {
+	) -> (usize, BaseTraceOracles, Option<ExtraTraceOracles>) {
 		builder_prover.push_namespace("memory_lookup_prover");
 
 		fn inner(
@@ -689,7 +699,6 @@ impl IntegrityCheckGadget {
 			let count = traces.len();
 			let n_vars = log2_ceil_usize(count);
 
-			// Prepare lookup input for preimages
 			let preimage_offset =
 				builder_prover.add_committed("preimage_offset", n_vars, F32::TOWER_LEVEL);
 			let single_preimage_absorb = builder_prover
@@ -784,6 +793,7 @@ impl IntegrityCheckGadget {
 			)
 		}
 
+		// Base traces processing
 		let (
 			pre_hash_state,
 			preimage_offset,
@@ -817,40 +827,43 @@ impl IntegrityCheckGadget {
 				.unwrap();
 		}
 
-		let (
-			pre_hash_state_extra,
-			preimage_offset_extra,
-			preimage_length_extra,
-			hash_offset_extra,
-			single_preimage_absorb_extra,
-			post_hash_state_extra,
-		) = if self.extra_traces.len() > 0 {
-			let (a, b, c, d, e, f) =
-				inner("extra-traces", memory_prover, builder_prover, &self.extra_traces);
-			(Some(a), Some(b), Some(c), Some(d), Some(e), Some(f))
+		// Extra traces processing
+		let extra_trace_oracles = if self.extra_traces.len() > 0 {
+			let (
+				pre_hash_state,
+				preimage_offset,
+				preimage_length,
+				hash_offset,
+				single_preimage_absorb,
+				post_hash_state,
+			) = inner("extra-traces", memory_prover, builder_prover, &self.extra_traces);
+			Some(ExtraTraceOracles {
+				pre_hash_state,
+				preimage_offset,
+				preimage_length,
+				hash_offset,
+				single_preimage_absorb,
+				post_hash_state,
+			})
 		} else {
-			(None, None, None, None, None, None)
+			None
 		};
 
-		// this has to be invoked once data for memory lookup is prepared
 		let memory_size = memory_prover.run_lookup(builder_prover).unwrap();
 
 		builder_prover.pop_namespace();
 
 		(
 			memory_size,
-			pre_hash_state,
-			preimage_offset,
-			preimage_length,
-			hash_offset,
-			single_preimage_absorb,
-			post_hash_state,
-			pre_hash_state_extra,
-			preimage_offset_extra,
-			preimage_length_extra,
-			hash_offset_extra,
-			single_preimage_absorb_extra,
-			post_hash_state_extra,
+			BaseTraceOracles {
+				pre_hash_state,
+				preimage_offset,
+				preimage_length,
+				hash_offset,
+				single_preimage_absorb,
+				post_hash_state,
+			},
+			extra_trace_oracles,
 		)
 	}
 
@@ -858,29 +871,21 @@ impl IntegrityCheckGadget {
 		&mut self,
 		memory_prover: &mut MemoryGadget,
 		builder_prover: &mut ConstraintSystemBuilder,
-		pre_hash_state: [OracleId; KECCAK_STATE_BYTE_SIZE],
-		preimage_offset: OracleId,
-		preimage_length: OracleId,
-		hash_offset: OracleId,
-
-		pre_hash_state_extra: Option<[OracleId; KECCAK_STATE_BYTE_SIZE]>,
-		post_hash_state_extra: Option<[OracleId; KECCAK_STATE_BYTE_SIZE]>,
-		preimage_offset_extra: Option<OracleId>,
-		preimage_length_extra: Option<OracleId>,
-		hash_offset_extra: Option<OracleId>,
+		base_trace_oracles: &BaseTraceOracles,
+		extra_trace_oracles: Option<&ExtraTraceOracles>,
 	) {
 		builder_prover.push_namespace("trace_slice_correlation_prover");
 
+		// Base traces processing
 		let count = self.base_traces.len();
 		let n_vars = log2_ceil_usize(count);
 
-		// pack in order to save on pushing / pulling
 		let packed_pre_hash_state = pack_oracles(
 			builder_prover,
 			"packed_pre_hash_state",
 			n_vars,
 			F8::TOWER_LEVEL,
-			pre_hash_state,
+			base_trace_oracles.pre_hash_state,
 		)
 		.unwrap();
 
@@ -894,20 +899,18 @@ impl IntegrityCheckGadget {
 
 		let channel = builder_prover.add_channel();
 
-		// This 'pull' from channel ...
 		builder_prover
 			.receive(
 				channel,
 				count,
 				packed_pre_hash_state.into_iter().chain([
-					preimage_offset,
-					preimage_length,
-					hash_offset,
+					base_trace_oracles.preimage_offset,
+					base_trace_oracles.preimage_length,
+					base_trace_oracles.hash_offset,
 				]),
 			)
 			.unwrap();
 
-		// Checking that sponge_channel is balanced means enforcing correlation between Traces and Slices
 		let preimage_offset =
 			builder_prover.add_committed("preimage_offset", n_vars, F32::TOWER_LEVEL);
 		let preimage_length =
@@ -939,16 +942,11 @@ impl IntegrityCheckGadget {
 		let mut flush_oracles = vec![zero_column; KECCAK_STATE_BYTE_SIZE.div_ceil(per_lincom)];
 		flush_oracles.extend([preimage_offset, preimage_length, hash_offset]);
 
-		// ... is balanced by this 'push' to sponge_channel
 		builder_prover.send(channel, count, flush_oracles).unwrap();
 
 		// Extra traces processing
 		if self.extra_traces.len() > 0 {
-			let pre_hash_state_extra = pre_hash_state_extra.unwrap();
-			let post_hash_state_extra = post_hash_state_extra.unwrap();
-			let preimage_offset_extra = preimage_offset_extra.unwrap();
-			let preimage_length_extra = preimage_length_extra.unwrap();
-			let hash_offset_extra = hash_offset_extra.unwrap();
+			let extra_trace_oracles = extra_trace_oracles.unwrap();
 
 			let count_extra = self.extra_traces.len();
 			let n_vars_extra = log2_ceil_usize(count_extra);
@@ -961,7 +959,7 @@ impl IntegrityCheckGadget {
 				.add_linear_combination(
 					"next_preimage_offset",
 					n_vars_extra,
-					[(preimage_offset_extra, hash_r_mult_stride.into())],
+					[(extra_trace_oracles.preimage_offset, hash_r_mult_stride.into())],
 				)
 				.unwrap();
 
@@ -969,7 +967,7 @@ impl IntegrityCheckGadget {
 				.add_linear_combination(
 					"next_remaining_bytes",
 					n_vars_extra,
-					[(preimage_length_extra, hash_r_mult_stride_inverse.into())],
+					[(extra_trace_oracles.preimage_length, hash_r_mult_stride_inverse.into())],
 				)
 				.unwrap();
 
@@ -978,7 +976,7 @@ impl IntegrityCheckGadget {
 				"packed_pre_hash_state_extra",
 				n_vars_extra,
 				F8::TOWER_LEVEL,
-				pre_hash_state_extra,
+				extra_trace_oracles.pre_hash_state,
 			)
 			.unwrap();
 
@@ -987,7 +985,7 @@ impl IntegrityCheckGadget {
 				"packed_post_hash_state_extra",
 				n_vars_extra,
 				F8::TOWER_LEVEL,
-				post_hash_state_extra,
+				extra_trace_oracles.post_hash_state,
 			)
 			.unwrap();
 
@@ -1034,9 +1032,9 @@ impl IntegrityCheckGadget {
 					channel,
 					count_extra,
 					packed_pre_hash_state_extra.into_iter().chain([
-						preimage_offset_extra,
-						preimage_length_extra,
-						hash_offset_extra,
+						extra_trace_oracles.preimage_offset,
+						extra_trace_oracles.preimage_length,
+						extra_trace_oracles.hash_offset,
 					]),
 				)
 				.unwrap();
@@ -1048,7 +1046,7 @@ impl IntegrityCheckGadget {
 					packed_post_hash_state_extra.into_iter().chain([
 						next_preimage_offset_extra,
 						next_preimage_length_extra,
-						hash_offset_extra,
+						extra_trace_oracles.hash_offset,
 					]),
 				)
 				.unwrap();
@@ -1060,10 +1058,8 @@ impl IntegrityCheckGadget {
 	pub fn padding_consistency_prover(
 		&mut self,
 		builder_prover: &mut ConstraintSystemBuilder,
-		pre_hash_state: [OracleId; KECCAK_STATE_BYTE_SIZE],
-		single_preimage_absorb: [OracleId; SINGLE_PREIMAGE_ABSORB_BYTE_SIZE],
-		pre_hash_state_extra: Option<[OracleId; KECCAK_STATE_BYTE_SIZE]>,
-		single_preimage_absorb_extra: Option<[OracleId; SINGLE_PREIMAGE_ABSORB_BYTE_SIZE]>,
+		base_trace_oracles: &BaseTraceOracles,
+		extra_trace_oracles: Option<&ExtraTraceOracles>,
 	) -> (
 		[OracleId; SINGLE_PREIMAGE_ABSORB_BYTE_SIZE],
 		Vec<OracleId>,
@@ -1072,12 +1068,10 @@ impl IntegrityCheckGadget {
 	) {
 		builder_prover.push_namespace("padding_consistency_prover");
 
+		// Base traces processing
 		let count = self.base_traces.len();
 		let n_vars = log2_ceil_usize(count);
 
-		// block absorption logic
-
-		// selector (definition and witness population)
 		let selector = builder_prover.add_committed_multiple::<SINGLE_PREIMAGE_ABSORB_BYTE_SIZE>(
 			"selector",
 			n_vars,
@@ -1100,7 +1094,6 @@ impl IntegrityCheckGadget {
 			|row| selector_fn(row.slice.preimage_length).map(u8::from),
 		);
 
-		// padded_absorbed (definition and witness population)
 		let padded_absorbed = builder_prover
 			.add_committed_multiple::<SINGLE_PREIMAGE_ABSORB_BYTE_SIZE>(
 				"padded_absorbed",
@@ -1112,7 +1105,6 @@ impl IntegrityCheckGadget {
 		})
 		.unwrap();
 
-		// padding_values (definition and witness population)
 		let padding_values = builder_prover
 			.add_committed_multiple::<SINGLE_PREIMAGE_ABSORB_BYTE_SIZE>(
 				"padding_values",
@@ -1125,7 +1117,6 @@ impl IntegrityCheckGadget {
 		})
 		.unwrap();
 
-		// constrain padding consistency (we now have all columns defined)
 		let padding_consistency = arith_expr!(
 			[padded, pre_hash_state, selector, padding_value, rom_read] =
 				padded + pre_hash_state + selector * rom_read + (1 - selector) * padding_value
@@ -1133,10 +1124,10 @@ impl IntegrityCheckGadget {
 
 		izip!(
 			&padded_absorbed,
-			&pre_hash_state,
+			&base_trace_oracles.pre_hash_state,
 			&selector,
 			&padding_values,
-			&single_preimage_absorb
+			&base_trace_oracles.single_preimage_absorb
 		)
 		.enumerate()
 		.for_each(
@@ -1155,10 +1146,9 @@ impl IntegrityCheckGadget {
 			},
 		);
 
-		// extra traces processing
+		// Extra traces processing
 		let padded_absorbed_extra = if self.extra_traces.len() > 0 {
-			let single_preimage_absorb_extra = single_preimage_absorb_extra.unwrap();
-			let pre_hash_state_extra = pre_hash_state_extra.unwrap();
+			let extra_trace_oracles = extra_trace_oracles.unwrap();
 
 			let count_extra = self.extra_traces.len();
 			let n_vars_extra = log2_ceil_usize(count_extra);
@@ -1170,8 +1160,8 @@ impl IntegrityCheckGadget {
 							format!("padded_absorbed_extra_{}", i),
 							n_vars_extra,
 							[
-								(single_preimage_absorb_extra[i], F::ONE),
-								(pre_hash_state_extra[i], F::ONE),
+								(extra_trace_oracles.single_preimage_absorb[i], F::ONE),
+								(extra_trace_oracles.pre_hash_state[i], F::ONE),
 							],
 						)
 						.expect(
@@ -1208,14 +1198,12 @@ impl IntegrityCheckGadget {
 	) {
 		builder_prover.push_namespace("padding_lookup_prover");
 
+		// Base traces processing (padding is not applicable to the extra traces by definition)
 		let count = self.base_traces.len();
 		let n_vars = log2_ceil_usize(count);
 
 		let lookup_n_vars = log2_ceil_usize(SINGLE_PREIMAGE_ABSORB_BYTE_SIZE);
 
-		// padding lasso lookup
-
-		// preimage_length_t
 		let preimage_length_t =
 			builder_prover.add_committed("preimage_length_t", lookup_n_vars, F32::TOWER_LEVEL);
 
@@ -1235,7 +1223,6 @@ impl IntegrityCheckGadget {
 				});
 		}
 
-		// packed_padding_values_u (definition and witness population)
 		let packed_padding_values_u = pack_oracles(
 			builder_prover,
 			"packed_padding_values_u",
@@ -1252,7 +1239,6 @@ impl IntegrityCheckGadget {
 			|row| padding_values_fn(row.slice.preimage_length).map(u8::from),
 		);
 
-		// selector_t (definition and witness population)
 		let selector_t = builder_prover.add_committed_multiple::<SINGLE_PREIMAGE_ABSORB_BYTE_SIZE>(
 			"selector_t",
 			lookup_n_vars,
@@ -1281,7 +1267,6 @@ impl IntegrityCheckGadget {
 			|&row_index| selector_fn(row_index % SINGLE_PREIMAGE_ABSORB_BYTE_SIZE).map(u8::from),
 		);
 
-		// padding_values_t (definition and witness population)
 		let padding_values_t = builder_prover
 			.add_committed_multiple::<SINGLE_PREIMAGE_ABSORB_BYTE_SIZE>(
 				"padding_values_t",
@@ -1293,7 +1278,6 @@ impl IntegrityCheckGadget {
 		})
 		.unwrap();
 
-		// packed_padding_values_t (definition and witness population)
 		let packed_padding_values_t = pack_oracles(
 			builder_prover,
 			"packed_padding_values_t",
@@ -1312,7 +1296,6 @@ impl IntegrityCheckGadget {
 			},
 		);
 
-		// input for lasso lookup
 		let lookup_u = chain!(packed_selector_u, packed_padding_values_u, [preimage_length_oracle])
 			.collect_vec();
 
@@ -1345,21 +1328,18 @@ impl IntegrityCheckGadget {
 		&mut self,
 		builder_prover: &mut ConstraintSystemBuilder,
 		padded_absorbed: [OracleId; SINGLE_PREIMAGE_ABSORB_BYTE_SIZE],
-		pre_hash_state: [OracleId; KECCAK_STATE_BYTE_SIZE],
-		post_hash_state: [OracleId; KECCAK_STATE_BYTE_SIZE],
 		padded_absorbed_extra: Option<[OracleId; SINGLE_PREIMAGE_ABSORB_BYTE_SIZE]>,
-		pre_hash_state_extra: Option<[OracleId; KECCAK_STATE_BYTE_SIZE]>,
-		post_hash_state_extra: Option<[OracleId; KECCAK_STATE_BYTE_SIZE]>,
+		base_trace_oracles: &BaseTraceOracles,
+		extra_trace_oracles: Option<&ExtraTraceOracles>,
 	) {
 		builder_prover.push_namespace("keccak_state_transition_prover");
 
+		// Base traces processing
 		let count_base = self.base_traces.len();
 		let n_vars_base = log2_ceil_usize(count_base);
 
-		// balancing this channel means enforcing keccak computations executed over pre_hash_state
 		let keccakf_channel = builder_prover.add_channel();
 
-		// build_keccakf_push
 		let keccakf_push_body = pack_oracles(
 			builder_prover,
 			"keccakf_push_body",
@@ -1367,8 +1347,8 @@ impl IntegrityCheckGadget {
 			F8::TOWER_LEVEL,
 			chain!(
 				&padded_absorbed,
-				&pre_hash_state[SINGLE_PREIMAGE_ABSORB_BYTE_SIZE..],
-				&post_hash_state
+				&base_trace_oracles.pre_hash_state[SINGLE_PREIMAGE_ABSORB_BYTE_SIZE..],
+				&base_trace_oracles.post_hash_state
 			)
 			.copied(),
 		)
@@ -1389,16 +1369,14 @@ impl IntegrityCheckGadget {
 			},
 		);
 
-		// this sending to keccakf_channel ...
 		builder_prover
 			.send(keccakf_channel, count_base, keccakf_push_body)
 			.unwrap();
 
-		// build_keccakf_pull
+		// Both Base and Extra traces processing
 		if self.extra_traces.len() > 0 {
 			let padded_absorbed_extra = padded_absorbed_extra.unwrap();
-			let pre_hash_state_extra = pre_hash_state_extra.unwrap();
-			let post_hash_state_extra = post_hash_state_extra.unwrap();
+			let extra_trace_oracles = extra_trace_oracles.unwrap();
 
 			let count_total = self.base_traces.len() + self.extra_traces.len();
 			let n_vars_total = log2_ceil_usize(count_total);
@@ -1452,12 +1430,10 @@ impl IntegrityCheckGadget {
 				|(input, output)| chain!(&input.0, &output.0).copied(),
 			);
 
-			// ... is balanced by this receiving
 			builder_prover
 				.receive(keccakf_channel, count_total, keccakf_pull_body)
 				.unwrap();
 
-			// Extra traces processing (build_keccakf_push for extra traces)
 			let count_extra = self.extra_traces.len();
 			let n_vars_extra = log2_ceil_usize(count_extra);
 
@@ -1468,8 +1444,8 @@ impl IntegrityCheckGadget {
 				F8::TOWER_LEVEL,
 				chain!(
 					&padded_absorbed_extra,
-					&pre_hash_state_extra[SINGLE_PREIMAGE_ABSORB_BYTE_SIZE..],
-					&post_hash_state_extra
+					&extra_trace_oracles.pre_hash_state[SINGLE_PREIMAGE_ABSORB_BYTE_SIZE..],
+					&extra_trace_oracles.post_hash_state
 				)
 				.copied(),
 			)
@@ -1564,24 +1540,13 @@ impl IntegrityCheckGadget {
 	////// VERIFIER
 	////////////////////////////////////////////////////////////////////////////////////
 
+	// Verifier's API is identical to Prover's one, with the only difference - no witness population happens
+
 	pub fn memory_lookup_verifier(
 		&mut self,
 		memory_verifier: &mut MemoryGadget,
 		builder_verifier: &mut ConstraintSystemBuilder,
-	) -> (
-		[OracleId; KECCAK_STATE_BYTE_SIZE],
-		OracleId,
-		OracleId,
-		OracleId,
-		[OracleId; SINGLE_PREIMAGE_ABSORB_BYTE_SIZE],
-		[OracleId; KECCAK_STATE_BYTE_SIZE],
-		Option<[OracleId; KECCAK_STATE_BYTE_SIZE]>,
-		Option<OracleId>,
-		Option<OracleId>,
-		Option<OracleId>,
-		Option<[OracleId; SINGLE_PREIMAGE_ABSORB_BYTE_SIZE]>,
-		Option<[OracleId; KECCAK_STATE_BYTE_SIZE]>,
-	) {
+	) -> (BaseTraceOracles, Option<ExtraTraceOracles>) {
 		builder_verifier.push_namespace("memory_lookup_verifier");
 
 		fn inner(
@@ -1655,7 +1620,6 @@ impl IntegrityCheckGadget {
 			)
 		}
 
-		// handle base traces
 		let (
 			pre_hash_state,
 			preimage_offset,
@@ -1665,7 +1629,6 @@ impl IntegrityCheckGadget {
 			post_hash_state,
 		) = inner("base-traces", memory_verifier, builder_verifier, &self.base_traces);
 
-		// hash lookup
 		post_hash_state[..HASH_SIZE]
 			.iter()
 			.enumerate()
@@ -1682,55 +1645,49 @@ impl IntegrityCheckGadget {
 			.collect::<Result<Vec<_>, _>>()
 			.unwrap();
 
-		// handle extra traces
-		let (
-			pre_hash_state_extra,
-			preimage_offset_extra,
-			preimage_length_extra,
-			hash_offset_extra,
-			single_preimage_absorb_extra,
-			post_hash_state_extra,
-		) = if self.extra_traces.len() > 0 {
-			let (a, b, c, d, e, f) =
-				inner("extra-traces", memory_verifier, builder_verifier, &self.extra_traces);
-			(Some(a), Some(b), Some(c), Some(d), Some(e), Some(f))
+		let extra_trace_oracles = if self.extra_traces.len() > 0 {
+			let (
+				pre_hash_state,
+				preimage_offset,
+				preimage_length,
+				hash_offset,
+				single_preimage_absorb,
+				post_hash_state,
+			) = inner("extra-traces", memory_verifier, builder_verifier, &self.extra_traces);
+			Some(ExtraTraceOracles {
+				pre_hash_state,
+				preimage_offset,
+				preimage_length,
+				hash_offset,
+				single_preimage_absorb,
+				post_hash_state,
+			})
 		} else {
-			(None, None, None, None, None, None)
+			None
 		};
 
-		// run lookup over memory
 		memory_verifier.run_lookup(builder_verifier).unwrap();
 
 		builder_verifier.pop_namespace();
 
 		(
-			pre_hash_state,
-			preimage_offset,
-			preimage_length,
-			hash_offset,
-			single_preimage_absorb,
-			post_hash_state,
-			pre_hash_state_extra,
-			preimage_offset_extra,
-			preimage_length_extra,
-			hash_offset_extra,
-			single_preimage_absorb_extra,
-			post_hash_state_extra,
+			BaseTraceOracles {
+				pre_hash_state,
+				preimage_offset,
+				preimage_length,
+				hash_offset,
+				single_preimage_absorb,
+				post_hash_state,
+			},
+			extra_trace_oracles,
 		)
 	}
 
 	pub fn trace_slice_correlation_verifier(
 		&mut self,
 		builder_verifier: &mut ConstraintSystemBuilder,
-		pre_hash_state: [OracleId; KECCAK_STATE_BYTE_SIZE],
-		preimage_offset: OracleId,
-		preimage_length: OracleId,
-		hash_offset: OracleId,
-		pre_hash_state_extra: Option<[OracleId; KECCAK_STATE_BYTE_SIZE]>,
-		post_hash_state_extra: Option<[OracleId; KECCAK_STATE_BYTE_SIZE]>,
-		preimage_offset_extra: Option<OracleId>,
-		preimage_length_extra: Option<OracleId>,
-		hash_offset_extra: Option<OracleId>,
+		base_trace_oracles: &BaseTraceOracles,
+		extra_trace_oracles: Option<&ExtraTraceOracles>,
 	) {
 		builder_verifier.push_namespace("trace_slice_correlation_verifier");
 
@@ -1742,22 +1699,20 @@ impl IntegrityCheckGadget {
 			"packed_pre_hash_state_verifier",
 			n_vars,
 			F8::TOWER_LEVEL,
-			pre_hash_state,
+			base_trace_oracles.pre_hash_state,
 		)
 		.unwrap();
 
-		// balancing this channel means enforcing correlation between Traces and Slices (information about preimages and hashes)
 		let memory_slice_info_channel = builder_verifier.add_channel();
 
-		// receiving from base traces: pre-hash-state | preimage-offset | preimage-length | hash-offset
 		builder_verifier
 			.receive(
 				memory_slice_info_channel,
 				count,
 				packed_pre_hash_state.into_iter().chain([
-					preimage_offset,
-					preimage_length,
-					hash_offset,
+					base_trace_oracles.preimage_offset,
+					base_trace_oracles.preimage_length,
+					base_trace_oracles.hash_offset,
 				]),
 			)
 			.unwrap();
@@ -1776,19 +1731,12 @@ impl IntegrityCheckGadget {
 		let mut flush_oracles = vec![zero_column; KECCAK_STATE_BYTE_SIZE.div_ceil(per_lincom)];
 		flush_oracles.extend([preimage_offset, preimage_length, hash_offset]);
 
-		// sending from base traces: zero_column | preimage-offset | preimage-length | hash-offset
-		// E.g. this means that we force expect
 		builder_verifier
 			.send(memory_slice_info_channel, count, flush_oracles)
 			.unwrap();
 
-		// Extra traces processing
 		if self.extra_traces.len() > 0 {
-			let pre_hash_state_extra = pre_hash_state_extra.unwrap();
-			let post_hash_state_extra = post_hash_state_extra.unwrap();
-			let preimage_offset_extra = preimage_offset_extra.unwrap();
-			let preimage_length_extra = preimage_length_extra.unwrap();
-			let hash_offset_extra = hash_offset_extra.unwrap();
+			let extra_trace_oracles = extra_trace_oracles.unwrap();
 
 			let count_extra = self.extra_traces.len();
 			let n_vars_extra = log2_ceil_usize(count_extra);
@@ -1801,7 +1749,7 @@ impl IntegrityCheckGadget {
 				.add_linear_combination(
 					"next_preimage_offset_verifier",
 					n_vars_extra,
-					[(preimage_offset_extra, hash_r_mult_stride.into())],
+					[(extra_trace_oracles.preimage_offset, hash_r_mult_stride.into())],
 				)
 				.unwrap();
 
@@ -1809,7 +1757,7 @@ impl IntegrityCheckGadget {
 				.add_linear_combination(
 					"next_remaining_bytes_verifier",
 					n_vars_extra,
-					[(preimage_length_extra, hash_r_mult_stride_inverse.into())],
+					[(extra_trace_oracles.preimage_length, hash_r_mult_stride_inverse.into())],
 				)
 				.unwrap();
 
@@ -1818,7 +1766,7 @@ impl IntegrityCheckGadget {
 				"packed_pre_hash_state_extra_verifier",
 				n_vars_extra,
 				F8::TOWER_LEVEL,
-				pre_hash_state_extra,
+				extra_trace_oracles.pre_hash_state,
 			)
 			.unwrap();
 
@@ -1827,7 +1775,7 @@ impl IntegrityCheckGadget {
 				"packed_post_hash_state_extra_verifier",
 				n_vars_extra,
 				F8::TOWER_LEVEL,
-				post_hash_state_extra,
+				extra_trace_oracles.post_hash_state,
 			)
 			.unwrap();
 
@@ -1836,9 +1784,9 @@ impl IntegrityCheckGadget {
 					memory_slice_info_channel,
 					count_extra,
 					packed_pre_hash_state_extra.into_iter().chain([
-						preimage_offset_extra,
-						preimage_length_extra,
-						hash_offset_extra,
+						extra_trace_oracles.preimage_offset,
+						extra_trace_oracles.preimage_length,
+						extra_trace_oracles.hash_offset,
 					]),
 				)
 				.unwrap();
@@ -1850,7 +1798,7 @@ impl IntegrityCheckGadget {
 					packed_post_hash_state_extra.into_iter().chain([
 						next_preimage_offset_extra,
 						next_preimage_length_extra,
-						hash_offset_extra,
+						extra_trace_oracles.hash_offset,
 					]),
 				)
 				.unwrap();
@@ -1862,10 +1810,8 @@ impl IntegrityCheckGadget {
 	pub fn padding_consistency_verifier(
 		&mut self,
 		builder_verifier: &mut ConstraintSystemBuilder,
-		pre_hash_state: [OracleId; KECCAK_STATE_BYTE_SIZE],
-		single_preimage_absorb: [OracleId; SINGLE_PREIMAGE_ABSORB_BYTE_SIZE],
-		pre_hash_state_extra: Option<[OracleId; KECCAK_STATE_BYTE_SIZE]>,
-		single_preimage_absorb_extra: Option<[OracleId; SINGLE_PREIMAGE_ABSORB_BYTE_SIZE]>,
+		base_trace_oracles: &BaseTraceOracles,
+		extra_trace_oracles: Option<&ExtraTraceOracles>,
 	) -> (
 		[OracleId; SINGLE_PREIMAGE_ABSORB_BYTE_SIZE],
 		Vec<OracleId>,
@@ -1877,9 +1823,6 @@ impl IntegrityCheckGadget {
 		let count = self.base_traces.len();
 		let n_vars = log2_ceil_usize(count);
 
-		// block absorption logic
-
-		// selector (definition)
 		let selector = builder_verifier.add_committed_multiple::<SINGLE_PREIMAGE_ABSORB_BYTE_SIZE>(
 			"selector_verifier",
 			n_vars,
@@ -1894,7 +1837,6 @@ impl IntegrityCheckGadget {
 		)
 		.unwrap();
 
-		// padded_absorbed (definition)
 		let padded_absorbed = builder_verifier
 			.add_committed_multiple::<SINGLE_PREIMAGE_ABSORB_BYTE_SIZE>(
 				"padded_absorbed_verifier",
@@ -1902,7 +1844,6 @@ impl IntegrityCheckGadget {
 				F8::TOWER_LEVEL,
 			);
 
-		// padding_values (definition)
 		let padding_values = builder_verifier
 			.add_committed_multiple::<SINGLE_PREIMAGE_ABSORB_BYTE_SIZE>(
 				"padding_values_verifier",
@@ -1910,7 +1851,6 @@ impl IntegrityCheckGadget {
 				F8::TOWER_LEVEL,
 			);
 
-		// constrain padding consistency (we now have all columns defined)
 		let padding_consistency = arith_expr!(
 			[padded, pre_hash_state, selector, padding_value, rom_read] =
 				padded + pre_hash_state + selector * rom_read + (1 - selector) * padding_value
@@ -1918,10 +1858,10 @@ impl IntegrityCheckGadget {
 
 		izip!(
 			&padded_absorbed,
-			&pre_hash_state,
+			&base_trace_oracles.pre_hash_state,
 			&selector,
 			&padding_values,
-			&single_preimage_absorb
+			&base_trace_oracles.single_preimage_absorb
 		)
 		.enumerate()
 		.for_each(
@@ -1940,10 +1880,8 @@ impl IntegrityCheckGadget {
 			},
 		);
 
-		// extra traces processing
 		let padded_absorbed_extra = if self.extra_traces.len() > 0 {
-			let single_preimage_absorb_extra = single_preimage_absorb_extra.unwrap();
-			let pre_hash_state_extra = pre_hash_state_extra.unwrap();
+			let extra_trace_oracles = extra_trace_oracles.unwrap();
 
 			let count_extra = self.extra_traces.len();
 			let n_vars_extra = log2_ceil_usize(count_extra);
@@ -1954,8 +1892,8 @@ impl IntegrityCheckGadget {
 							format!("padded_absorbed_extra{}", i),
 							n_vars_extra,
 							[
-								(single_preimage_absorb_extra[i], F::ONE),
-								(pre_hash_state_extra[i], F::ONE),
+								(extra_trace_oracles.single_preimage_absorb[i], F::ONE),
+								(extra_trace_oracles.pre_hash_state[i], F::ONE),
 							],
 						)
 						.expect(
@@ -1986,16 +1924,12 @@ impl IntegrityCheckGadget {
 		let n_vars = log2_ceil_usize(count);
 		let lookup_n_vars = log2_ceil_usize(SINGLE_PREIMAGE_ABSORB_BYTE_SIZE);
 
-		// padding lasso lookup
-
-		// remaining_bytes_t
 		let remaining_bytes_t = builder_verifier.add_committed(
 			"remaining_bytes_t_verifier",
 			lookup_n_vars,
 			F32::TOWER_LEVEL,
 		);
 
-		// packed_padding_values_u (definition)
 		let packed_padding_values_u = pack_oracles(
 			builder_verifier,
 			"packed_padding_values_u_verifier",
@@ -2005,7 +1939,6 @@ impl IntegrityCheckGadget {
 		)
 		.unwrap();
 
-		// selector_t (definition)
 		let selector_t = builder_verifier
 			.add_committed_multiple::<SINGLE_PREIMAGE_ABSORB_BYTE_SIZE>(
 				"selector_t",
@@ -2021,7 +1954,6 @@ impl IntegrityCheckGadget {
 		)
 		.unwrap();
 
-		// padding_values_t (definition)
 		let padding_values_t = builder_verifier
 			.add_committed_multiple::<SINGLE_PREIMAGE_ABSORB_BYTE_SIZE>(
 				"padding_values_t_verifier",
@@ -2029,7 +1961,6 @@ impl IntegrityCheckGadget {
 				F8::TOWER_LEVEL,
 			);
 
-		// packed_padding_values_t (definition and witness population)
 		let packed_padding_values_t = pack_oracles(
 			builder_verifier,
 			"packed_padding_values_t_verifier",
@@ -2039,7 +1970,6 @@ impl IntegrityCheckGadget {
 		)
 		.unwrap();
 
-		// input for lasso lookup
 		let lookup_u =
 			chain!(packed_selector_u, packed_padding_values_u, [preimage_length]).collect_vec();
 
@@ -2067,21 +1997,17 @@ impl IntegrityCheckGadget {
 		&mut self,
 		builder_verifier: &mut ConstraintSystemBuilder,
 		padded_absorbed: [OracleId; SINGLE_PREIMAGE_ABSORB_BYTE_SIZE],
-		pre_hash_state: [OracleId; KECCAK_STATE_BYTE_SIZE],
-		post_hash_state: [OracleId; KECCAK_STATE_BYTE_SIZE],
 		padded_absorbed_extra: Option<[OracleId; SINGLE_PREIMAGE_ABSORB_BYTE_SIZE]>,
-		pre_hash_state_extra: Option<[OracleId; KECCAK_STATE_BYTE_SIZE]>,
-		post_hash_state_extra: Option<[OracleId; KECCAK_STATE_BYTE_SIZE]>,
+		base_trace_oracles: &BaseTraceOracles,
+		extra_trace_oracles: Option<&ExtraTraceOracles>,
 	) {
 		builder_verifier.push_namespace("keccak_state_transition_verifier");
 
 		let count_base = self.base_traces.len();
 		let n_vars_base = log2_ceil_usize(count_base);
 
-		// balancing this channel means enforcing keccak computations executed over pre_hash_state
 		let state_transition_channel = builder_verifier.add_channel();
 
-		// build_keccakf_push
 		let keccakf_push_body = pack_oracles(
 			builder_verifier,
 			"keccakf_push_body",
@@ -2089,23 +2015,20 @@ impl IntegrityCheckGadget {
 			F8::TOWER_LEVEL,
 			chain!(
 				&padded_absorbed,
-				&pre_hash_state[SINGLE_PREIMAGE_ABSORB_BYTE_SIZE..],
-				&post_hash_state
+				&base_trace_oracles.pre_hash_state[SINGLE_PREIMAGE_ABSORB_BYTE_SIZE..],
+				&base_trace_oracles.post_hash_state
 			)
 			.copied(),
 		)
 		.unwrap();
 
-		// this sending to keccakf_channel ...
 		builder_verifier
 			.send(state_transition_channel, count_base, keccakf_push_body)
 			.unwrap();
 
-		// build_keccakf_pull
 		if self.extra_traces.len() > 0 {
 			let padded_absorbed_extra = padded_absorbed_extra.unwrap();
-			let pre_hash_state_extra = pre_hash_state_extra.unwrap();
-			let post_hash_state_extra = post_hash_state_extra.unwrap();
+			let extra_trace_oracles = extra_trace_oracles.unwrap();
 
 			let count_total = self.base_traces.len() + self.extra_traces.len();
 			let n_vars_total = log2_ceil_usize(count_total);
@@ -2122,12 +2045,10 @@ impl IntegrityCheckGadget {
 			)
 			.unwrap();
 
-			// ... is balanced by this receiving
 			builder_verifier
 				.receive(state_transition_channel, count_total, keccakf_pull_body)
 				.unwrap();
 
-			// Extra traces processing (build_keccakf_push for extra traces)
 			let count_extra = self.extra_traces.len();
 			let n_vars_extra = log2_ceil_usize(count_extra);
 
@@ -2138,8 +2059,8 @@ impl IntegrityCheckGadget {
 				F8::TOWER_LEVEL,
 				chain!(
 					&padded_absorbed_extra,
-					&pre_hash_state_extra[SINGLE_PREIMAGE_ABSORB_BYTE_SIZE..],
-					&post_hash_state_extra
+					&extra_trace_oracles.pre_hash_state[SINGLE_PREIMAGE_ABSORB_BYTE_SIZE..],
+					&extra_trace_oracles.post_hash_state
 				)
 				.copied(),
 			)
