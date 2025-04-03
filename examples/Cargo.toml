@@ -172,6 +172,10 @@ path = "acc-ro-memory.rs"
 name = "acc-keccak-vm-memory"
 path = "acc-keccak-vm-memory.rs"
 
+[[example]]
+name = "acc-blake3"
+path = "acc-blake3.rs"
+
 [lints.clippy]
 needless_range_loop = "allow"
 
