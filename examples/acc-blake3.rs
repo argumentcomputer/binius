@@ -1,3 +1,28 @@
+use std::{array, time::Instant};
+
+use binius_circuits::{
+	arithmetic,
+	arithmetic::{u32::LOG_U32_BITS, Flags},
+	builder::{
+		types::{F, U},
+		ConstraintSystemBuilder,
+	},
+};
+use binius_core::{
+	constraint_system,
+	constraint_system::validate::validate_witness,
+	fiat_shamir::HasherChallenger,
+	oracle::{OracleId, ProjectionVariant, ShiftVariant},
+	tower::CanonicalTowerFamily,
+};
+use binius_field::{BinaryField1b, BinaryField32b, Field, TowerField};
+use binius_hal::make_portable_backend;
+use binius_hash::groestl::{Groestl256, Groestl256ByteCompression};
+use binius_macros::arith_expr;
+use binius_utils::checked_arithmetics::log2_ceil_usize;
+use bytesize::ByteSize;
+use rand::{rngs::OsRng, Rng};
+
 const IV: [u32; 8] = [
 	0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19,
 ];
@@ -40,20 +65,34 @@ fn compress(
 	let mx = [16, 18, 20, 22, 24, 26, 28, 30];
 	let my = [17, 19, 21, 23, 25, 27, 29, 31];
 
+	// we have 7 rounds in total
 	for round_idx in 0..7 {
 		for j in 0..8 {
-			state[a[j]] = state[a[j]].wrapping_add(state[b[j]]).wrapping_add(state[mx[j]]);
-			state[d[j]] = (state[d[j]] ^ state[a[j]]).rotate_right(16);
-			state[c[j]] = state[c[j]].wrapping_add(state[d[j]]);
-			state[b[j]] = (state[b[j]] ^ state[c[j]]).rotate_right(12);
-			state[a[j]] = state[a[j]].wrapping_add(state[b[j]]).wrapping_add(state[my[j]]);
-			state[d[j]] = (state[d[j]] ^ state[a[j]]).rotate_right(8);
-			state[c[j]] = state[c[j]].wrapping_add(state[d[j]]);
-			state[b[j]] = (state[b[j]] ^ state[c[j]]).rotate_right(7);
+			let a_in = state[a[j]];
+			let b_in = state[b[j]];
+			let c_in = state[c[j]];
+			let d_in = state[d[j]];
+			let mx_in = state[mx[j]];
+			let my_in = state[my[j]];
+
+			let a_0 = a_in.wrapping_add(b_in).wrapping_add(mx_in);
+			let d_0 = (d_in ^ a_0).rotate_right(16);
+			let c_0 = c_in.wrapping_add(d_0);
+			let b_0 = (b_in ^ c_0).rotate_right(12);
+
+			let a_1 = a_0.wrapping_add(b_0).wrapping_add(my_in);
+			let d_1 = (d_0 ^ a_1).rotate_right(8);
+			let c_1 = c_0.wrapping_add(d_1);
+			let b_1 = (b_0 ^ c_1).rotate_right(7);
+
+			state[a[j]] = a_1;
+			state[b[j]] = b_1;
+			state[c[j]] = c_1;
+			state[d[j]] = d_1;
 		}
 
-		// permutation
-		if round_idx != 7 {
+		// execute permutation for the 6 first rounds
+		if round_idx < 6 {
 			let mut permuted = [0; 16];
 			for i in 0..16 {
 				permuted[i] = state[16 + MSG_PERMUTATION[i]];
@@ -72,8 +111,6 @@ fn compress(
 	let state_out: [u32; 16] = std::array::from_fn(|i| state[i]);
 	state_out
 }
-
-
 
 fn words_from_little_endian_bytes(bytes: &[u8], words: &mut [u32]) {
 	debug_assert_eq!(bytes.len(), 4 * words.len());
@@ -116,12 +153,10 @@ fn blake3_new_update_finalize(input_: Vec<u8>) -> [u8; 32] {
 	let mut chunk_state_blocks_compressed = 0u8;
 	let mut chunk_state_flags = hasher_flags;
 
-
 	/* Update */
 	while !input.is_empty() {
 		let chunk_state_len =
 			BLOCK_LEN * chunk_state_blocks_compressed as usize + chunk_state_block_len as usize;
-		//println!("chunk_state_len: {:?}", chunk_state_len);
 		if CHUNK_LEN == chunk_state_len {
 			// output
 			let mut block_words = [0; 16];
@@ -266,7 +301,6 @@ fn blake3_new_update_finalize(input_: Vec<u8>) -> [u8; 32] {
 
 	let mut output_block_counter = 0u64;
 	for out_block in output.chunks_mut(2 * OUT_LEN) {
-
 		let words = compress(
 			&input_chaining_value,
 			&block_words,
@@ -284,12 +318,542 @@ fn blake3_new_update_finalize(input_: Vec<u8>) -> [u8; 32] {
 	output
 }
 
+// Circuit constants
+const STATE_SIZE: usize = 32;
+
+const SINGLE_STATE_TRANSITION_N_VARS: usize = 6;
+
+// Number of initial state mutations until getting output value
+const TEMP_STATE_OUT_INDEX: usize = 56;
+// Number of initial state mutations in "binary" form
+const TEMP_STATE_OUT_INDEX_BINARY: [F; SINGLE_STATE_TRANSITION_N_VARS] = [
+	Field::ZERO,
+	Field::ZERO,
+	Field::ZERO,
+	Field::ONE,
+	Field::ONE,
+	Field::ONE,
+];
+const SINGLE_COMPRESSION_HEIGHT: usize = 64;
+const CV_HEIGHT: usize = 8;
+
+type F32 = BinaryField32b;
+type F1 = BinaryField1b;
+
+struct TestVector {
+	cv: [u32; 8],
+	block: [u32; 16],
+	counter_low: u32,
+	counter_high: u32,
+	block_len: u32,
+	flags: u32,
+	expected: [u32; 16],
+}
+
+pub struct Blake3CompressionOracles {
+	pub input: [OracleId; STATE_SIZE],
+	pub output: [OracleId; STATE_SIZE],
+}
+
+// TODO: refactor the circuit code
+fn circuit(
+	builder: &mut ConstraintSystemBuilder,
+	traces: &Vec<TestVector>,
+) -> Blake3CompressionOracles {
+	assert!(traces.len() >= 8);
+
+	// state
+	let state_n_vars = log2_ceil_usize(traces.len() * SINGLE_COMPRESSION_HEIGHT);
+	let state_transitions: [OracleId; STATE_SIZE] = builder.add_committed_multiple(
+		"state_transitions",
+		state_n_vars,
+		BinaryField32b::TOWER_LEVEL,
+	);
+
+	// input
+	let input: [OracleId; STATE_SIZE] = array::from_fn(|xy| {
+		builder
+			.add_projected(
+				"projected state input",
+				state_transitions[xy],
+				vec![F::ZERO; SINGLE_STATE_TRANSITION_N_VARS],
+				ProjectionVariant::FirstVars,
+			)
+			.unwrap()
+	});
+
+	// output
+	let output: [OracleId; STATE_SIZE] = array::from_fn(|xy| {
+		builder
+			.add_projected(
+				"output",
+				state_transitions[xy],
+				TEMP_STATE_OUT_INDEX_BINARY.to_vec(),
+				ProjectionVariant::FirstVars,
+			)
+			.unwrap()
+	});
+
+	// columns for enforcing cv computation
+	let out_n_vars = log2_ceil_usize(traces.len() * CV_HEIGHT);
+	let cv_oracle: OracleId = builder.add_committed("cv", out_n_vars, BinaryField32b::TOWER_LEVEL);
+	let state_i = builder.add_committed("state_i", out_n_vars, BinaryField32b::TOWER_LEVEL);
+	let state_i_8 = builder.add_committed("state_i_8", out_n_vars, BinaryField32b::TOWER_LEVEL);
+
+	let state_i_xor_state_i_8 = builder
+		.add_linear_combination(
+			"state_i_xor_state_i_8",
+			out_n_vars,
+			[(state_i, F::ONE), (state_i_8, F::ONE)],
+		)
+		.unwrap();
+
+	let cv_oracle_xor_state_i_8 = builder
+		.add_linear_combination(
+			"cv_oracle_xor_state_i_8",
+			out_n_vars,
+			[(cv_oracle, F::ONE), (state_i_8, F::ONE)],
+		)
+		.unwrap();
+
+	// columns for enforcing correct computation of temp variables
+	let a_in: OracleId =
+		builder.add_committed("a_in", state_n_vars + 5, BinaryField1b::TOWER_LEVEL);
+	let b_in: OracleId =
+		builder.add_committed("b_in", state_n_vars + 5, BinaryField1b::TOWER_LEVEL);
+	let c_in: OracleId =
+		builder.add_committed("c_in", state_n_vars + 5, BinaryField1b::TOWER_LEVEL);
+	let d_in: OracleId =
+		builder.add_committed("d_in", state_n_vars + 5, BinaryField1b::TOWER_LEVEL);
+	let mx_in: OracleId =
+		builder.add_committed("mx_in", state_n_vars + 5, BinaryField1b::TOWER_LEVEL);
+	let my_in: OracleId =
+		builder.add_committed("my_in", state_n_vars + 5, BinaryField1b::TOWER_LEVEL);
+	let a_0_tmp: OracleId =
+		builder.add_committed("a_0_tmp", state_n_vars + 5, BinaryField1b::TOWER_LEVEL);
+	let a_0: OracleId = builder.add_committed("a_0", state_n_vars + 5, BinaryField1b::TOWER_LEVEL);
+	let c_0: OracleId = builder.add_committed("c_0", state_n_vars + 5, BinaryField1b::TOWER_LEVEL);
+	let b_in_xor_c_0: OracleId = builder
+		.add_linear_combination("b_in_xor_c_0", state_n_vars + 5, [(b_in, F::ONE), (c_0, F::ONE)])
+		.unwrap();
+	let b_0: OracleId = builder
+		.add_shifted(
+			"d_1",
+			b_in_xor_c_0,
+			(32 - 12) as usize,
+			LOG_U32_BITS,
+			ShiftVariant::CircularLeft,
+		)
+		.unwrap();
+	let d_in_xor_a_0: OracleId = builder
+		.add_linear_combination("d_in_xor_a_0", state_n_vars + 5, [(d_in, F::ONE), (a_0, F::ONE)])
+		.unwrap();
+	let d_0: OracleId = builder
+		.add_shifted(
+			"d_0",
+			d_in_xor_a_0,
+			(32 - 16) as usize,
+			LOG_U32_BITS,
+			ShiftVariant::CircularLeft,
+		)
+		.unwrap();
+	let a_1_tmp: OracleId =
+		builder.add_committed("a_1_tmp", state_n_vars + 5, BinaryField1b::TOWER_LEVEL);
+	let a_1: OracleId = builder.add_committed("a_1", state_n_vars + 5, BinaryField1b::TOWER_LEVEL);
+	let d_0_xor_a_1: OracleId = builder
+		.add_linear_combination("d_0_xor_a_1", state_n_vars + 5, [(d_0, F::ONE), (a_1, F::ONE)])
+		.unwrap();
+	let d_1: OracleId = builder
+		.add_shifted(
+			"d_1",
+			d_0_xor_a_1,
+			(32 - 8) as usize,
+			LOG_U32_BITS,
+			ShiftVariant::CircularLeft,
+		)
+		.unwrap();
+	let c_1: OracleId = builder.add_committed("c_1", state_n_vars + 5, BinaryField1b::TOWER_LEVEL);
+	let b_0_xor_c_1: OracleId = builder
+		.add_linear_combination("b_0_xor_c_1", state_n_vars + 5, [(b_0, F::ONE), (c_1, F::ONE)])
+		.unwrap();
+	let b_1: OracleId = builder
+		.add_shifted(
+			"b_1",
+			b_0_xor_c_1,
+			(32 - 7) as usize,
+			LOG_U32_BITS,
+			ShiftVariant::CircularLeft,
+		)
+		.unwrap();
+
+	// witness population (columns creation and data writing)
+	if let Some(witness) = builder.witness() {
+		// columns creation
+
+		let mut state_cols = state_transitions.map(|id| witness.new_column::<F32>(id));
+		let mut input_cols = input.map(|id| witness.new_column::<F32>(id));
+		let mut output_cols = output.map(|id| witness.new_column::<F32>(id));
+
+		let mut cv_oracle_col = witness.new_column::<F32>(cv_oracle);
+		let mut state_i_col = witness.new_column::<F32>(state_i);
+		let mut state_i_8_col = witness.new_column::<F32>(state_i_8);
+		let mut state_i_xor_state_i_8_col = witness.new_column::<F32>(state_i_xor_state_i_8);
+		let mut cv_oracle_xor_state_i_8_col = witness.new_column::<F32>(cv_oracle_xor_state_i_8);
+
+		let mut a_in_col = witness.new_column::<F1>(a_in);
+		let mut b_in_col = witness.new_column::<F1>(b_in);
+		let mut c_in_col = witness.new_column::<F1>(c_in);
+		let mut d_in_col = witness.new_column::<F1>(d_in);
+		let mut mx_in_col = witness.new_column::<F1>(mx_in);
+		let mut my_in_col = witness.new_column::<F1>(my_in);
+		let mut a_0_tmp_col = witness.new_column::<F1>(a_0_tmp);
+		let mut a_0_col = witness.new_column::<F1>(a_0);
+		let mut b_in_xor_c_0_col = witness.new_column::<F1>(b_in_xor_c_0);
+		let mut b_0_col = witness.new_column::<F1>(b_0);
+		let mut c_0_col = witness.new_column::<F1>(c_0);
+		let mut d_in_xor_a_0_col = witness.new_column::<F1>(d_in_xor_a_0);
+		let mut d_0_col = witness.new_column::<F1>(d_0);
+		let mut a_1_tmp_col = witness.new_column::<F1>(a_1_tmp);
+		let mut a_1_col = witness.new_column::<F1>(a_1);
+		let mut d_0_xor_a_1_col = witness.new_column::<F1>(d_0_xor_a_1);
+		let mut d_1_col = witness.new_column::<F1>(d_1);
+		let mut c_1_col = witness.new_column::<F1>(c_1);
+		let mut b_0_xor_c_1_col = witness.new_column::<F1>(b_0_xor_c_1);
+		let mut b_1_col = witness.new_column::<F1>(b_1);
+
+		// values
+
+		let state_vals = state_cols.each_mut().map(|col| col.as_mut_slice::<u32>());
+		let input_vals = input_cols.each_mut().map(|col| col.as_mut_slice::<u32>());
+		let output_vals = output_cols.each_mut().map(|col| col.as_mut_slice::<u32>());
+
+		let cv_oracle_vals = cv_oracle_col.as_mut_slice::<u32>();
+		let state_i_vals = state_i_col.as_mut_slice::<u32>();
+		let state_i_8_vals = state_i_8_col.as_mut_slice::<u32>();
+		let state_i_xor_state_i_8_vals = state_i_xor_state_i_8_col.as_mut_slice::<u32>();
+		let cv_oracle_xor_state_i_8_vals = cv_oracle_xor_state_i_8_col.as_mut_slice::<u32>();
+
+		let a_in_vals = a_in_col.as_mut_slice::<u32>();
+		let b_in_vals = b_in_col.as_mut_slice::<u32>();
+		let c_in_vals = c_in_col.as_mut_slice::<u32>();
+		let d_in_vals = d_in_col.as_mut_slice::<u32>();
+		let mx_in_vals = mx_in_col.as_mut_slice::<u32>();
+		let my_in_vals = my_in_col.as_mut_slice::<u32>();
+		let a_0_tmp_vals = a_0_tmp_col.as_mut_slice::<u32>();
+		let a_0_vals = a_0_col.as_mut_slice::<u32>();
+		let b_in_xor_c_0_vals = b_in_xor_c_0_col.as_mut_slice::<u32>();
+		let b_0_vals = b_0_col.as_mut_slice::<u32>();
+		let c_0_vals = c_0_col.as_mut_slice::<u32>();
+		let d_in_xor_a_0_vals = d_in_xor_a_0_col.as_mut_slice::<u32>();
+		let d_0_vals = d_0_col.as_mut_slice::<u32>();
+		let a_1_tmp_vals = a_1_tmp_col.as_mut_slice::<u32>();
+		let a_1_vals = a_1_col.as_mut_slice::<u32>();
+		let d_0_xor_a_1_vals = d_0_xor_a_1_col.as_mut_slice::<u32>();
+		let d_1_vals = d_1_col.as_mut_slice::<u32>();
+		let c_1_vals = c_1_col.as_mut_slice::<u32>();
+		let b_0_xor_c_1_vals = b_0_xor_c_1_col.as_mut_slice::<u32>();
+		let b_1_vals = b_1_col.as_mut_slice::<u32>();
+
+		/* Populating */
+
+		let a = [0, 1, 2, 3, 0, 1, 2, 3];
+		let b = [4, 5, 6, 7, 5, 6, 7, 4];
+		let c = [8, 9, 10, 11, 10, 11, 8, 9];
+		let d = [12, 13, 14, 15, 15, 12, 13, 14];
+		let mx = [16, 18, 20, 22, 24, 26, 28, 30];
+		let my = [17, 19, 21, 23, 25, 27, 29, 31];
+
+		let mut compression_offset = 0usize;
+		for (compression_idx, trace) in traces.into_iter().enumerate() {
+			let mut state_idx = 0;
+
+			// populate state
+			for i in 0..trace.cv.len() {
+				state_vals[state_idx][compression_offset] = trace.cv[i];
+				state_idx += 1;
+			}
+
+			state_vals[state_idx + 0][compression_offset] = IV[0];
+			state_vals[state_idx + 1][compression_offset] = IV[1];
+			state_vals[state_idx + 2][compression_offset] = IV[2];
+			state_vals[state_idx + 3][compression_offset] = IV[3];
+			state_vals[state_idx + 4][compression_offset] = trace.counter_low;
+			state_vals[state_idx + 5][compression_offset] = trace.counter_high;
+			state_vals[state_idx + 6][compression_offset] = trace.block_len;
+			state_vals[state_idx + 7][compression_offset] = trace.flags;
+
+			state_idx += 8;
+
+			for i in 0..trace.block.len() {
+				state_vals[state_idx][compression_offset] = trace.block[i];
+				state_idx += 1;
+			}
+
+			// populate input, which consists from initial values of each state_transition
+			for xy in 0..STATE_SIZE {
+				input_vals[xy][compression_idx] = state_vals[xy][compression_offset];
+			}
+
+			assert_eq!(state_idx, STATE_SIZE);
+
+			// we start from 1, since initial state is at 0
+			let mut state_offset = 1usize;
+			let mut temp_vars_offset = 0usize;
+			for round_idx in 0..7 {
+				for j in 0..8 {
+					// column-wise copy of the previous state to the next one
+					for i in 0..STATE_SIZE {
+						state_vals[i][state_offset + compression_offset] =
+							state_vals[i][state_offset + compression_offset - 1];
+					}
+
+					a_in_vals[temp_vars_offset + compression_offset] =
+						state_vals[a[j]][state_offset + compression_offset - 1];
+					b_in_vals[temp_vars_offset + compression_offset] =
+						state_vals[b[j]][state_offset + compression_offset - 1];
+					c_in_vals[temp_vars_offset + compression_offset] =
+						state_vals[c[j]][state_offset + compression_offset - 1];
+					d_in_vals[temp_vars_offset + compression_offset] =
+						state_vals[d[j]][state_offset + compression_offset - 1];
+
+					mx_in_vals[temp_vars_offset + compression_offset] =
+						state_vals[mx[j]][state_offset + compression_offset - 1];
+					my_in_vals[temp_vars_offset + compression_offset] =
+						state_vals[my[j]][state_offset + compression_offset - 1];
+
+					a_0_tmp_vals[temp_vars_offset + compression_offset] = a_in_vals
+						[temp_vars_offset + compression_offset]
+						.wrapping_add(b_in_vals[temp_vars_offset + compression_offset]);
+					a_0_vals[temp_vars_offset + compression_offset] = a_0_tmp_vals
+						[temp_vars_offset + compression_offset]
+						.wrapping_add(mx_in_vals[temp_vars_offset + compression_offset]);
+
+					d_in_xor_a_0_vals[temp_vars_offset + compression_offset] = d_in_vals
+						[temp_vars_offset + compression_offset]
+						^ a_0_vals[temp_vars_offset + compression_offset];
+
+					d_0_vals[temp_vars_offset + compression_offset] =
+						d_in_xor_a_0_vals[temp_vars_offset + compression_offset].rotate_right(16);
+
+					c_0_vals[temp_vars_offset + compression_offset] = c_in_vals
+						[temp_vars_offset + compression_offset]
+						.wrapping_add(d_0_vals[temp_vars_offset + compression_offset]);
+
+					b_in_xor_c_0_vals[temp_vars_offset + compression_offset] = b_in_vals
+						[temp_vars_offset + compression_offset]
+						^ c_0_vals[temp_vars_offset + compression_offset];
+
+					b_0_vals[temp_vars_offset + compression_offset] =
+						b_in_xor_c_0_vals[temp_vars_offset + compression_offset].rotate_right(12);
+
+					a_1_tmp_vals[temp_vars_offset + compression_offset] = a_0_vals
+						[temp_vars_offset + compression_offset]
+						.wrapping_add(b_0_vals[temp_vars_offset + compression_offset]);
+					a_1_vals[temp_vars_offset + compression_offset] = a_1_tmp_vals
+						[temp_vars_offset + compression_offset]
+						.wrapping_add(my_in_vals[temp_vars_offset + compression_offset]);
+
+					d_0_xor_a_1_vals[temp_vars_offset + compression_offset] = d_0_vals
+						[temp_vars_offset + compression_offset]
+						^ a_1_vals[temp_vars_offset + compression_offset];
+
+					d_1_vals[temp_vars_offset + compression_offset] =
+						d_0_xor_a_1_vals[temp_vars_offset + compression_offset].rotate_right(8);
+
+					c_1_vals[temp_vars_offset + compression_offset] = c_0_vals
+						[temp_vars_offset + compression_offset]
+						.wrapping_add(d_1_vals[temp_vars_offset + compression_offset]);
+
+					b_0_xor_c_1_vals[temp_vars_offset + compression_offset] = b_0_vals
+						[temp_vars_offset + compression_offset]
+						^ c_1_vals[temp_vars_offset + compression_offset];
+
+					b_1_vals[temp_vars_offset + compression_offset] =
+						b_0_xor_c_1_vals[temp_vars_offset + compression_offset].rotate_right(7);
+
+					state_vals[a[j]][state_offset + compression_offset] =
+						a_1_vals[temp_vars_offset + compression_offset];
+					state_vals[b[j]][state_offset + compression_offset] =
+						b_1_vals[temp_vars_offset + compression_offset];
+					state_vals[c[j]][state_offset + compression_offset] =
+						c_1_vals[temp_vars_offset + compression_offset];
+					state_vals[d[j]][state_offset + compression_offset] =
+						d_1_vals[temp_vars_offset + compression_offset];
+
+					state_offset += 1;
+					temp_vars_offset += 1;
+				}
+
+				// permutation (just shuffling the indices - no constraining is required)
+				if round_idx < 6 {
+					let mut permuted = [0u32; 16];
+					for i in 0..16 {
+						permuted[i] = state_vals[16 + MSG_PERMUTATION[i]]
+							[state_offset + compression_offset - 1];
+					}
+
+					for i in 0..16 {
+						state_vals[16 + i][state_offset + compression_offset - 1] = permuted[i];
+					}
+				}
+			}
+
+			assert_eq!(state_offset, TEMP_STATE_OUT_INDEX + 1);
+
+			for i in 0..8 {
+				// populate
+				cv_oracle_vals[i * compression_idx + i] = state_vals[i][compression_offset];
+				state_i_vals[i * compression_idx + i] =
+					state_vals[i][state_offset + compression_offset - 1];
+				state_i_8_vals[i * compression_idx + i] =
+					state_vals[i + 8][state_offset + compression_offset - 1];
+
+				// compute
+				state_vals[i][state_offset + compression_offset - 1] ^=
+					state_vals[i + 8][state_offset + compression_offset - 1];
+
+				// populate LC column
+				state_i_xor_state_i_8_vals[i * compression_idx + i] =
+					state_vals[i][state_offset + compression_offset - 1];
+
+				// compute
+				state_vals[i + 8][state_offset + compression_offset - 1] ^=
+					state_vals[i][compression_offset];
+
+				// populate LC column
+				cv_oracle_xor_state_i_8_vals[i * compression_idx + i] =
+					state_vals[i + 8][state_offset + compression_offset - 1];
+			}
+
+			for i in 0..STATE_SIZE {
+				output_vals[i][compression_idx] =
+					state_vals[i][state_offset + compression_offset - 1];
+			}
+
+			for i in 0..trace.expected.len() {
+				assert_eq!(output_vals[i][compression_idx], trace.expected[i]);
+			}
+
+			compression_offset += 64;
+		}
+	}
+
+	/* Constraints */
+
+	// TODO: remove this technical constraint (figure out how to properly constrain the 'state_i_8')
+	builder.assert_zero("state_i_8", [state_i_8], arith_expr!([x] = x - x).convert_field());
+
+	let a_0_tmp_expected =
+		arithmetic::u32::add(builder, "a_in + b_in", a_in, b_in, Flags::Unchecked).unwrap();
+
+	let a_0_expected =
+		arithmetic::u32::add(builder, "a_0_tmp + mx_in", a_0_tmp, mx_in, Flags::Unchecked).unwrap();
+
+	let c_0_expected =
+		arithmetic::u32::add(builder, "c_in + d_0", c_in, d_0, Flags::Unchecked).unwrap();
+
+	let a_1_tmp_expected =
+		arithmetic::u32::add(builder, "a_0 + b_0", a_0, b_0, Flags::Unchecked).unwrap();
+
+	let a_1_expected =
+		arithmetic::u32::add(builder, "a_1_tmp + my_in", a_1_tmp, my_in, Flags::Unchecked).unwrap();
+
+	let c_1_expected =
+		arithmetic::u32::add(builder, "c_0 + d_1", c_0, d_1, Flags::Unchecked).unwrap();
+
+	let expected = [
+		a_0_tmp_expected,
+		a_0_expected,
+		c_0_expected,
+		a_1_tmp_expected,
+		a_1_expected,
+		c_1_expected,
+	];
+	let actual = [a_0_tmp, a_0, c_0, a_1_tmp, a_1, c_1];
+
+	for (i, (expected_i, actual_i)) in expected.iter().zip(actual.iter()).enumerate() {
+		builder.assert_zero(
+			format!("addition result check {}", i),
+			[*actual_i, *expected_i],
+			arith_expr!([actual, expected] = actual - expected).convert_field(),
+		);
+	}
+
+	Blake3CompressionOracles { input, output }
+}
 
 fn main() {
+	// Out of circuit one-line blake3 computation - just for reference
 	let input = vec![1u8; 100000];
-	let expected = vec![53, 141, 211, 112, 176, 44, 170, 162, 62, 96, 62, 167, 158, 193, 48, 11, 87, 65, 249, 206, 195, 147, 187, 29, 215, 203, 74, 149, 182, 220, 28, 157];
+	let expected = vec![
+		53, 141, 211, 112, 176, 44, 170, 162, 62, 96, 62, 167, 158, 193, 48, 11, 87, 65, 249, 206,
+		195, 147, 187, 29, 215, 203, 74, 149, 182, 220, 28, 157,
+	];
 
 	let output = blake3_new_update_finalize(input);
 	assert_eq!(expected, output);
-}
 
+	// Circuit testing
+	let compressions = 10000;
+
+	let mut rng = OsRng;
+	let traces = (0..compressions)
+		.into_iter()
+		.map(|_| {
+			let cv: [u32; 8] = array::from_fn(|_| rng.gen::<u32>());
+			let block: [u32; 16] = array::from_fn(|_| rng.gen::<u32>());
+			let counter = rng.gen::<u64>();
+			let counter_low = counter as u32;
+			let counter_high = (counter >> 32) as u32;
+			let block_len = rng.gen::<u32>();
+			let flags = rng.gen::<u32>();
+
+			let expected = compress(&cv, &block, counter, block_len, flags);
+
+			TestVector {
+				cv,
+				block,
+				counter_low,
+				counter_high,
+				block_len,
+				flags,
+				expected,
+			}
+		})
+		.collect::<Vec<TestVector>>();
+
+	let allocator = bumpalo::Bump::new();
+	let mut builder = ConstraintSystemBuilder::new_with_witness(&allocator);
+
+	let _ = circuit(&mut builder, &traces);
+
+	let witness = builder.take_witness().unwrap();
+	let cs = builder.build().unwrap();
+	validate_witness(&cs, &vec![], &witness).unwrap();
+
+	let backend = make_portable_backend();
+
+	let start = Instant::now();
+	let proof = constraint_system::prove::<
+		U,
+		CanonicalTowerFamily,
+		Groestl256,
+		Groestl256ByteCompression,
+		HasherChallenger<Groestl256>,
+		_,
+	>(&cs, 1usize, 100usize, &[], witness, &backend)
+	.unwrap();
+	println!("Proving time: {:?}s", start.elapsed().as_secs());
+	println!("Proof size: {}", ByteSize::b(proof.get_proof_size() as u64));
+
+	let start = Instant::now();
+	constraint_system::verify::<
+		U,
+		CanonicalTowerFamily,
+		Groestl256,
+		Groestl256ByteCompression,
+		HasherChallenger<Groestl256>,
+	>(&cs.no_base_constraints(), 1usize, 100usize, &[], proof)
+	.unwrap();
+	println!("Verification time: {:?}s", start.elapsed().as_secs());
+}
