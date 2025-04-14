@@ -49,7 +49,7 @@ use binius_circuits::{
 };
 use binius_core::{
 	constraint_system,
-	constraint_system::channel::ChannelId,
+	constraint_system::channel::{ChannelId, OracleOrConst},
 	fiat_shamir::HasherChallenger,
 	oracle::OracleId,
 	tower::CanonicalTowerFamily,
@@ -904,9 +904,9 @@ impl IntegrityCheckGadget {
 				channel,
 				count,
 				packed_pre_hash_state.into_iter().chain([
-					base_trace_oracles.preimage_offset,
-					base_trace_oracles.preimage_length,
-					base_trace_oracles.hash_offset,
+					OracleOrConst::Oracle(base_trace_oracles.preimage_offset),
+					OracleOrConst::Oracle(base_trace_oracles.preimage_length),
+					OracleOrConst::Oracle(base_trace_oracles.hash_offset),
 				]),
 			)
 			.unwrap();
@@ -941,6 +941,11 @@ impl IntegrityCheckGadget {
 		let per_lincom = 1 << (F::TOWER_LEVEL - F8::TOWER_LEVEL);
 		let mut flush_oracles = vec![zero_column; KECCAK_STATE_BYTE_SIZE.div_ceil(per_lincom)];
 		flush_oracles.extend([preimage_offset, preimage_length, hash_offset]);
+
+		let flush_oracles = flush_oracles
+			.into_iter()
+			.map(|item| OracleOrConst::Oracle(item))
+			.collect::<Vec<OracleOrConst<F>>>();
 
 		builder_prover.send(channel, count, flush_oracles).unwrap();
 
@@ -1032,9 +1037,9 @@ impl IntegrityCheckGadget {
 					channel,
 					count_extra,
 					packed_pre_hash_state_extra.into_iter().chain([
-						extra_trace_oracles.preimage_offset,
-						extra_trace_oracles.preimage_length,
-						extra_trace_oracles.hash_offset,
+						OracleOrConst::Oracle(extra_trace_oracles.preimage_offset),
+						OracleOrConst::Oracle(extra_trace_oracles.preimage_length),
+						OracleOrConst::Oracle(extra_trace_oracles.hash_offset),
 					]),
 				)
 				.unwrap();
@@ -1044,9 +1049,9 @@ impl IntegrityCheckGadget {
 					channel,
 					count_extra,
 					packed_post_hash_state_extra.into_iter().chain([
-						next_preimage_offset_extra,
-						next_preimage_length_extra,
-						extra_trace_oracles.hash_offset,
+						OracleOrConst::Oracle(next_preimage_offset_extra),
+						OracleOrConst::Oracle(next_preimage_length_extra),
+						OracleOrConst::Oracle(extra_trace_oracles.hash_offset),
 					]),
 				)
 				.unwrap();
@@ -1185,6 +1190,16 @@ impl IntegrityCheckGadget {
 
 		builder_prover.pop_namespace();
 
+		let packed_selector_u = packed_selector_u
+			.into_iter()
+			.map(|item| {
+				let OracleOrConst::Oracle(converted) = item else {
+					todo!()
+				};
+				converted
+			})
+			.collect::<Vec<OracleId>>();
+
 		(padding_values, packed_selector_u, padded_absorbed, padded_absorbed_extra)
 	}
 
@@ -1296,8 +1311,39 @@ impl IntegrityCheckGadget {
 			},
 		);
 
+		let packed_padding_values_u = packed_padding_values_u
+			.into_iter()
+			.map(|item| {
+				let OracleOrConst::Oracle(converted) = item else {
+					todo!()
+				};
+				converted
+			})
+			.collect::<Vec<OracleId>>();
+
 		let lookup_u = chain!(packed_selector_u, packed_padding_values_u, [preimage_length_oracle])
 			.collect_vec();
+
+		// TODO: refactor
+		let packed_selector_t = packed_selector_t
+			.into_iter()
+			.map(|item| {
+				let OracleOrConst::Oracle(converted) = item else {
+					todo!()
+				};
+				converted
+			})
+			.collect::<Vec<OracleId>>();
+
+		let packed_padding_values_t = packed_padding_values_t
+			.into_iter()
+			.map(|item| {
+				let OracleOrConst::Oracle(converted) = item else {
+					todo!()
+				};
+				converted
+			})
+			.collect::<Vec<OracleId>>();
 
 		let lookup_t =
 			chain!(packed_selector_t, packed_padding_values_t, [preimage_length_t]).collect_vec();
@@ -1710,9 +1756,9 @@ impl IntegrityCheckGadget {
 				memory_slice_info_channel,
 				count,
 				packed_pre_hash_state.into_iter().chain([
-					base_trace_oracles.preimage_offset,
-					base_trace_oracles.preimage_length,
-					base_trace_oracles.hash_offset,
+					OracleOrConst::Oracle(base_trace_oracles.preimage_offset),
+					OracleOrConst::Oracle(base_trace_oracles.preimage_length),
+					OracleOrConst::Oracle(base_trace_oracles.hash_offset),
 				]),
 			)
 			.unwrap();
@@ -1730,6 +1776,11 @@ impl IntegrityCheckGadget {
 		let per_lincom = 1 << (F::TOWER_LEVEL - F8::TOWER_LEVEL);
 		let mut flush_oracles = vec![zero_column; KECCAK_STATE_BYTE_SIZE.div_ceil(per_lincom)];
 		flush_oracles.extend([preimage_offset, preimage_length, hash_offset]);
+
+		let flush_oracles = flush_oracles
+			.into_iter()
+			.map(|item| OracleOrConst::Oracle(item))
+			.collect::<Vec<OracleOrConst<F>>>();
 
 		builder_verifier
 			.send(memory_slice_info_channel, count, flush_oracles)
@@ -1784,9 +1835,9 @@ impl IntegrityCheckGadget {
 					memory_slice_info_channel,
 					count_extra,
 					packed_pre_hash_state_extra.into_iter().chain([
-						extra_trace_oracles.preimage_offset,
-						extra_trace_oracles.preimage_length,
-						extra_trace_oracles.hash_offset,
+						OracleOrConst::Oracle(extra_trace_oracles.preimage_offset),
+						OracleOrConst::Oracle(extra_trace_oracles.preimage_length),
+						OracleOrConst::Oracle(extra_trace_oracles.hash_offset),
 					]),
 				)
 				.unwrap();
@@ -1796,9 +1847,9 @@ impl IntegrityCheckGadget {
 					memory_slice_info_channel,
 					count_extra,
 					packed_post_hash_state_extra.into_iter().chain([
-						next_preimage_offset_extra,
-						next_preimage_length_extra,
-						extra_trace_oracles.hash_offset,
+						OracleOrConst::Oracle(next_preimage_offset_extra),
+						OracleOrConst::Oracle(next_preimage_length_extra),
+						OracleOrConst::Oracle(extra_trace_oracles.hash_offset),
 					]),
 				)
 				.unwrap();
@@ -1908,6 +1959,16 @@ impl IntegrityCheckGadget {
 
 		builder_verifier.pop_namespace();
 
+		let packed_selector_u = packed_selector_u
+			.into_iter()
+			.map(|item| {
+				let OracleOrConst::Oracle(converted) = item else {
+					todo!()
+				};
+				converted
+			})
+			.collect::<Vec<OracleId>>();
+
 		(padding_values, packed_selector_u, padded_absorbed, padded_absorbed_extra)
 	}
 
@@ -1970,8 +2031,39 @@ impl IntegrityCheckGadget {
 		)
 		.unwrap();
 
+		let packed_padding_values_u = packed_padding_values_u
+			.into_iter()
+			.map(|item| {
+				let OracleOrConst::Oracle(converted) = item else {
+					todo!()
+				};
+				converted
+			})
+			.collect::<Vec<OracleId>>();
+
 		let lookup_u =
 			chain!(packed_selector_u, packed_padding_values_u, [preimage_length]).collect_vec();
+
+		// TODO: refactor
+		let packed_selector_t = packed_selector_t
+			.into_iter()
+			.map(|item| {
+				let OracleOrConst::Oracle(converted) = item else {
+					todo!()
+				};
+				converted
+			})
+			.collect::<Vec<OracleId>>();
+
+		let packed_padding_values_t = packed_padding_values_t
+			.into_iter()
+			.map(|item| {
+				let OracleOrConst::Oracle(converted) = item else {
+					todo!()
+				};
+				converted
+			})
+			.collect::<Vec<OracleId>>();
 
 		let lookup_t =
 			chain!(packed_selector_t, packed_padding_values_t, [remaining_bytes_t]).collect_vec();
@@ -2177,7 +2269,7 @@ pub fn pack_oracles(
 	n_vars: usize,
 	packed_tower_level: usize,
 	oracles: impl IntoIterator<Item = OracleId, IntoIter: Clone>,
-) -> anyhow::Result<Vec<OracleId>> {
+) -> anyhow::Result<Vec<OracleOrConst<F>>> {
 	assert!(packed_tower_level <= F::TOWER_LEVEL);
 
 	let iter = oracles.into_iter();
@@ -2186,20 +2278,22 @@ pub fn pack_oracles(
 
 	(0..lincoms)
 		.map(|i| {
-			Ok(builder.add_linear_combination(
-				format!("{}_{}", group_name, i),
-				n_vars,
-				iter.clone()
-					.skip(per_lincom * i)
-					.take(per_lincom)
-					.enumerate()
-					.map(|(j, column)| {
-						let basis = <F as TowerField>::basis(packed_tower_level, j)
-							.expect("per_lincom is chosen to never overflow B128");
+			Ok(OracleOrConst::Oracle(
+				builder.add_linear_combination(
+					format!("{}_{}", group_name, i),
+					n_vars,
+					iter.clone()
+						.skip(per_lincom * i)
+						.take(per_lincom)
+						.enumerate()
+						.map(|(j, column)| {
+							let basis = <F as TowerField>::basis(packed_tower_level, j)
+								.expect("per_lincom is chosen to never overflow B128");
 
-						(column, basis)
-					}),
-			)?)
+							(column, basis)
+						}),
+				)?,
+			))
 		})
 		.collect()
 }
@@ -2207,7 +2301,7 @@ pub fn pack_oracles(
 pub fn pack_witness<'a, Row, ReturnIter>(
 	builder: &mut ConstraintSystemBuilder,
 	rows_witness: &'a [Row],
-	lincom_oracles: &[OracleId],
+	lincom_oracles: &[OracleOrConst<F>],
 	packed_tower_level: usize,
 	getter: impl Fn(&'a Row) -> ReturnIter + Sync,
 ) where
@@ -2224,7 +2318,11 @@ pub fn pack_witness<'a, Row, ReturnIter>(
 	let per_lincom = 1 << (F::TOWER_LEVEL - packed_tower_level);
 
 	for (i, &lincom_oracle) in lincom_oracles.iter().enumerate() {
-		let mut column = witness.new_column::<F>(lincom_oracle);
+		let OracleOrConst::Oracle(oracle) = lincom_oracle else {
+			todo!()
+		};
+
+		let mut column = witness.new_column::<F>(oracle);
 		let column_u128 = column.as_mut_slice::<u128>();
 
 		column_u128

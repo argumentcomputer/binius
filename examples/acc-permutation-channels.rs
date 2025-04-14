@@ -1,6 +1,6 @@
 use binius_circuits::{builder::ConstraintSystemBuilder, unconstrained::fixed_u32};
 use binius_core::constraint_system::{
-	channel::{Boundary, FlushDirection},
+	channel::{Boundary, FlushDirection, OracleOrConst},
 	validate::validate_witness,
 };
 use binius_field::{BinaryField128b, BinaryField32b};
@@ -66,7 +66,16 @@ fn main() {
 
 	let channel = builder.add_channel();
 	// count defines how many values ( 0 .. count ) from a given columns to send (pushing to a channel)
-	builder.send(channel, 4, [u128_in, u128_out]).unwrap();
+	builder
+		.send(
+			channel,
+			4,
+			[
+				OracleOrConst::Oracle(u128_in),
+				OracleOrConst::Oracle(u128_out),
+			],
+		)
+		.unwrap();
 
 	let witness = builder.take_witness().unwrap();
 	let cs = builder.build().unwrap();

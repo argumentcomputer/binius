@@ -12,7 +12,7 @@ use binius_core::{
 	constraint_system,
 	constraint_system::validate::validate_witness,
 	fiat_shamir::HasherChallenger,
-	oracle::{OracleId, ProjectionVariant, ShiftVariant},
+	oracle::{OracleId, ShiftVariant},
 	tower::CanonicalTowerFamily,
 };
 use binius_field::{BinaryField1b, BinaryField32b, Field, TowerField};
@@ -377,7 +377,7 @@ fn circuit(
 				"projected state input",
 				state_transitions[xy],
 				vec![F::ZERO; SINGLE_STATE_TRANSITION_N_VARS],
-				ProjectionVariant::FirstVars,
+				0,
 			)
 			.unwrap()
 	});
@@ -385,12 +385,7 @@ fn circuit(
 	// output
 	let output: [OracleId; STATE_SIZE] = array::from_fn(|xy| {
 		builder
-			.add_projected(
-				"output",
-				state_transitions[xy],
-				TEMP_STATE_OUT_INDEX_BINARY.to_vec(),
-				ProjectionVariant::FirstVars,
-			)
+			.add_projected("output", state_transitions[xy], TEMP_STATE_OUT_INDEX_BINARY.to_vec(), 0)
 			.unwrap()
 	});
 

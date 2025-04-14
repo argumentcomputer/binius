@@ -1,9 +1,15 @@
 use binius_circuits::{builder::ConstraintSystemBuilder, unconstrained::unconstrained};
-use binius_core::{constraint_system::validate::validate_witness, oracle::ProjectionVariant};
+use binius_core::constraint_system::validate::validate_witness;
 use binius_field::{BinaryField128b, BinaryField8b};
 
 type F128 = BinaryField128b;
 type F8 = BinaryField8b;
+
+#[derive(Clone)]
+enum ProjectionVariant {
+	FirstVars,
+	LastVars,
+}
 
 #[derive(Clone)]
 struct U8U128ProjectionInfo {
@@ -27,14 +33,14 @@ fn projection(
 
 	let input = unconstrained::<F8>(builder, "in", projection_info.clone().log_size).unwrap();
 
-	let projected = builder
-		.add_projected(
-			"projected",
-			input,
-			projection_info.clone().binary,
-			projection_info.clone().variant,
-		)
-		.unwrap();
+	let projected = match projection_info.variant {
+		ProjectionVariant::FirstVars => builder
+			.add_projected("projected", input, projection_info.clone().binary, 0)
+			.unwrap(),
+		ProjectionVariant::LastVars => builder
+			.add_projected_last_vars("projected_last_vars", input, projection_info.clone().binary)
+			.unwrap(),
+	};
 
 	if let Some(witness) = builder.witness() {
 		let input_values = witness.get::<F8>(input).unwrap().as_slice::<u8>();
@@ -75,32 +81,42 @@ impl U8U128ProjectionInfo {
 	) -> U8U128ProjectionInfo {
 		assert!(log_size >= binary.len());
 
-		if variant == ProjectionVariant::LastVars {
-			// Pad with zeroes to LOG_SIZE len iterator.
-			// In this case we interpret binary values in a reverse order, meaning that the very first
-			// element is elder byte, so zeroes must be explicitly appended
-			let mut binary_clone = binary.clone();
-			let mut zeroes = vec![F128::new(0u128); log_size - binary.len()];
-			binary_clone.append(&mut zeroes);
+		let out = match variant {
+			ProjectionVariant::LastVars => {
+				// Pad with zeroes to LOG_SIZE len iterator.
+				// In this case we interpret binary values in a reverse order, meaning that the very first
+				// element is elder byte, so zeroes must be explicitly appended
+				let mut binary_clone = binary.clone();
+				let mut zeroes = vec![F128::new(0u128); log_size - binary.len()];
+				binary_clone.append(&mut zeroes);
 
-			let coefficients = (0..binary_clone.len())
-				.map(|degree| F128::new(2usize.pow(degree as u32) as u128))
-				.collect::<Vec<F128>>();
+				let coefficients = (0..binary_clone.len())
+					.map(|degree| F128::new(2usize.pow(degree as u32) as u128))
+					.collect::<Vec<F128>>();
 
-			let value = binary_clone
-				.iter()
-				.zip(coefficients.iter().rev())
-				.fold(F128::new(0u128), |acc, (byte, coefficient)| acc + (*byte) * (*coefficient));
+				let value = binary_clone
+					.iter()
+					.zip(coefficients.iter().rev())
+					.fold(F128::new(0u128), |acc, (byte, coefficient)| {
+						acc + (*byte) * (*coefficient)
+					});
 
-			assert_eq!(decimal as u128, value.val());
-		}
-
-		U8U128ProjectionInfo {
-			log_size,
-			decimal,
-			binary,
-			variant,
-		}
+				assert_eq!(decimal as u128, value.val());
+				U8U128ProjectionInfo {
+					log_size,
+					decimal,
+					binary,
+					variant,
+				}
+			}
+			ProjectionVariant::FirstVars => U8U128ProjectionInfo {
+				log_size,
+				decimal,
+				binary,
+				variant,
+			},
+		};
+		out
 	}
 
 	fn expected_projection_len(&self) -> usize {

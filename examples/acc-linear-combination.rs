@@ -54,8 +54,7 @@ fn bytes_decomposition_gadget(
 			// 01000000
 			// 10000000
 			//
-			let basis =
-				<F8 as ExtensionField<F1>>::basis(b).expect("index is less than extension degree");
+			let basis = <F8 as ExtensionField<F1>>::basis(b);
 			(output_bits[b], basis.into())
 		}),
 	)?;
