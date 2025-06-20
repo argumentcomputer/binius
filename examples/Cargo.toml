@@ -27,6 +27,8 @@ rand.workspace = true
 tracing-profile.workspace = true
 tracing.workspace = true
 tiny-keccak = "2.0.2"
+blake3 = "1.8.2"
+
 
 [[example]]
 name = "keccakf_circuit"

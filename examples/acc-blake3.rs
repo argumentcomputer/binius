@@ -791,13 +791,16 @@ fn main() {
 		195, 147, 187, 29, 215, 203, 74, 149, 182, 220, 28, 157,
 	];
 
+	let reference_expected = blake3::hash(&input);
+	assert_eq!(reference_expected.as_bytes().to_vec(), expected);
+
 	let output = blake3_new_update_finalize(input);
 	assert_eq!(expected, output);
 
 	/* Circuit testing */
 
 	// generate traces / test-vectors
-	let compressions = 100;
+	let compressions = 10000;
 
 	let mut rng = OsRng;
 	let traces = (0..compressions)
