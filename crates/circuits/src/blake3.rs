@@ -470,9 +470,6 @@ pub fn blake3_compress(
 
 	/* Constraints */
 
-	// TODO: remove this technical constraint (figure out how to properly constrain the 'state_i_8')
-	//builder.assert_zero("state_i_8", [state_i_8], arith_expr!([x] = x - x).convert_field());
-
 	let xins = [a_in, a_0_tmp, c_in, a_0, a_1_tmp, c_0];
 	let yins = [b_in, mx_in, d_0, b_0, my_in, d_1];
 	let zouts = [a_0_tmp, a_0, c_0, a_1_tmp, a_1, c_1];
@@ -523,16 +520,16 @@ mod tests {
 		let counter_high = (counter >> 32) as u32;
 
 		#[rustfmt::skip]
-    let mut state = [
-        chaining_value[0], chaining_value[1], chaining_value[2], chaining_value[3],
-        chaining_value[4], chaining_value[5], chaining_value[6], chaining_value[7],
-        IV[0],             IV[1],             IV[2],             IV[3],
-        counter_low,       counter_high,      block_len,         flags,
-		block_words[0], block_words[1], block_words[2], block_words[3],
-		block_words[4], block_words[5], block_words[6], block_words[7],
-		block_words[8], block_words[9], block_words[10], block_words[11],
-		block_words[12], block_words[13], block_words[14], block_words[15],
-    ];
+		let mut state = [
+			chaining_value[0], chaining_value[1], chaining_value[2], chaining_value[3],
+			chaining_value[4], chaining_value[5], chaining_value[6], chaining_value[7],
+			IV[0],             IV[1],             IV[2],             IV[3],
+			counter_low,       counter_high,      block_len,         flags,
+			block_words[0], block_words[1], block_words[2], block_words[3],
+			block_words[4], block_words[5], block_words[6], block_words[7],
+			block_words[8], block_words[9], block_words[10], block_words[11],
+			block_words[12], block_words[13], block_words[14], block_words[15],
+		];
 
 		let a = [0, 1, 2, 3, 0, 1, 2, 3];
 		let b = [4, 5, 6, 7, 5, 6, 7, 4];

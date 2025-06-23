@@ -178,6 +178,10 @@ path = "acc-keccak-vm-memory.rs"
 name = "acc-blake3"
 path = "acc-blake3.rs"
 
+[[example]]
+name = "acc-blake3-compression-channels"
+path = "acc-blake3-compression-channels.rs"
+
 [lints.clippy]
 needless_range_loop = "allow"
 
